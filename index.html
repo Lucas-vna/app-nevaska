@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nevaska - Monitoramento de Freezers</title>
+  <link rel="manifest" href="data:application/json;base64,ewogICJuYW1lIjogIk5ldmFza2EgTW9uaXRvcmFtZW50byIsCiAgInNob3J0X25hbWUiOiAiTmV2YXNrYSIsCiAgInN0YXJ0X3VybCI6ICIuLyIsCiAgImRpc3BsYXkiOiAic3RhbmRhbG9uZSIsCiAgImJhY2tncm91bmRfY29sb3IiOiAiI0VCRjZGQyIsCiAgInRoZW1lX2NvbG9yIjogIiMwMEEzRTAiCiB9">
+  
+  <!-- Biblioteca MQTT via WebSockets e Ícones -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  
+  <style>
+    :root {
+      --azul-nevaska: #00A3E0;
+      --amarelo-nevaska: #FFD100;
+      --vermelho-alerta: #E30613;
+      --verde-ok: #28a745;
+      --fundo-gelo: #EBF6FC;
+      --texto-escuro: #1A2B3C;
+    }
+
+    * { 
+      box-sizing: border-box; 
+      margin: 0; 
+      padding: 0; 
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+    }
+    
+    body { 
+      background-color: var(--fundo-gelo); 
+      color: var(--texto-escuro); 
+      padding-bottom: 30px; 
+    }
+
+    header {
+      background: linear-gradient(135deg, var(--azul-nevaska), #0077A8);
+      color: white; 
+      padding: 20px; 
+      text-align: center;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.15); 
+      border-bottom: 4px solid var(--amarelo-nevaska);
+    }
+    
+    header h1 { 
+      font-size: 1.8rem; 
+      font-weight: 800; 
+      letter-spacing: 1px; 
+    }
+    
+    header p { 
+      font-size: 0.9rem; 
+      opacity: 0.9; 
+      margin-top: 4px; 
+    }
+
+    #connection-status {
+      display: inline-block; 
+      margin-top: 10px; 
+      padding: 4px 12px;
+      border-radius: 20px; 
+      font-size: 0.8rem; 
+      font-weight: bold; 
+      background-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .notif-banner {
+      background-color: var(--amarelo-nevaska); 
+      color: #333; 
+      text-align: center; 
+      padding: 12px;
+      font-weight: bold; 
+      font-size: 0.9rem; 
+      cursor: pointer; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      gap: 8px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+
+    .store-tabs { 
+      display: flex; 
+      justify-content: center; 
+      gap: 10px; 
+      margin: 20px auto; 
+      max-width: 500px; 
+      padding: 0 15px; 
+    }
+    
+    .tab-btn {
+      flex: 1; 
+      padding: 12px 15px; 
+      border: 2px solid var(--azul-nevaska); 
+      background-color: white; 
+      color: var(--azul-nevaska);
+      font-weight: bold; 
+      font-size: 1rem; 
+      border-radius: 12px; 
+      cursor: pointer; 
+      transition: all 0.3s ease; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      gap: 8px;
+    }
+    
+    .tab-btn.active { 
+      background-color: var(--azul-nevaska); 
+      color: white; 
+      box-shadow: 0 4px 8px rgba(0, 163, 224, 0.3); 
+    }
+
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      padding: 0 15px; 
+    }
+    
+    .store-section { 
+      display: none; 
+    }
+    
+    .store-section.active { 
+      display: block; 
+    }
+
+    .freezer-card {
+      background: white; 
+      border-radius: 16px; 
+      padding: 20px; 
+      margin-bottom: 15px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.06); 
+      border-left: 6px solid #ccc; 
+      transition: transform 0.2s ease; 
+    }
+    
+    .freezer-card.ok { 
+      border-left-color: var(--verde-ok); 
+    }
+    
+    .freezer-card.alert { 
+      border-left-color: var(--vermelho-alerta); 
+      background-color: #FFF5F5; 
+    }
+
+    .card-header { 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: center; 
+      margin-bottom: 15px; 
+    }
+    
+    .card-title { 
+      font-size: 1.2rem; 
+      font-weight: bold; 
+      color: var(--texto-escuro); 
+    }
+    
+    .status-badge { 
+      font-size: 0.75rem; 
+      font-weight: bold; 
+      padding: 4px 8px; 
+      border-radius: 8px; 
+      text-transform: uppercase;
+    }
+    
+    .status-badge.online { 
+      background-color: #E6F4EA; 
+      color: var(--verde-ok); 
+    }
+    
+    .status-badge.offline { 
+      background-color: #FCE8E6; 
+      color: var(--vermelho-alerta); 
+    }
+
+    .card-body { 
+      display: flex; 
+      align-items: center; 
+      justify-content: space-between; 
+    }
+    
+    .temp-display { 
+      font-size: 2.5rem; 
+      font-weight: 800; 
+    }
+    
+    .temp-display.ok { 
+      color: var(--verde-ok); 
+    }
+    
+    .temp-display.alert { 
+      color: var(--vermelho-alerta); 
+    }
+    
+    .temp-icon { 
+      font-size: 2.2rem; 
+      color: var(--azul-nevaska); 
+    }
+    
+    .card-footer { 
+      margin-top: 10px; 
+      font-size: 0.75rem; 
+      color: #777; 
+      text-align: right; 
+    }
+
+    .empty-msg {
+      text-align: center; 
+      color: #777; 
+      margin-top: 30px;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>NEVASKA</h1>
+    <p>Monitoramento de Freezers</p>
+    <div id="connection-status">Conectando ao HiveMQ...</div>
+  </header>
+
+  <!-- Banner de Notificações -->
+  <div id="notif-btn" class="notif-banner" onclick="requestNotificationPermission()">
+    <i class="fa-solid fa-bell"></i> Clique aqui para ATIVAR NOTIFICAÇÕES DE ALERTA no celular
+  </div>
+
+  <!-- Abas de Lojas -->
+  <div class="store-tabs">
+    <button class="tab-btn active" onclick="switchStore('NEVASKA_SC', event)">
+      <i class="fa-solid fa-store"></i> Santa Cruz
+    </button>
+    <button class="tab-btn" onclick="switchStore('NEVASKA_BERNARDINO', event)">
+      <i class="fa-solid fa-store"></i> Bernardino
+    </button>
+  </div>
+
+  <div class="container">
+    <!-- Seção Santa Cruz -->
+    <div id="NEVASKA_SC" class="store-section active">
+      <div id="cards-NEVASKA_SC">
+        <p class="empty-msg">Aguardando dados dos freezers de Santa Cruz...</p>
+      </div>
+    </div>
+
+    <!-- Seção Bernardino -->
+    <div id="NEVASKA_BERNARDINO" class="store-section">
+      <div id="cards-NEVASKA_BERNARDINO">
+        <p class="empty-msg">Aguardando dados dos freezers de Bernardino...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---------- REGISTRO DO SERVICE WORKER (PWA) ----------
+    let swRegistration = null;
+
+    if ('serviceWorker' in navigator) {
+      const swCode = `
+        self.addEventListener('install', e => self.skipWaiting());
+        self.addEventListener('activate', e => self.clients.claim());
+      `;
+      const blob = new Blob([swCode], { type: 'application/javascript' });
+      const swUrl = URL.createObjectURL(blob);
+
+      navigator.serviceWorker.register(swUrl).then(reg => {
+        swRegistration = reg;
+      }).catch(err => console.log('SW Erro:', err));
+    }
+
+    // ---------- CONFIGURAÇÕES HIVEMQ (WEBSOCKETS SSL) ----------
+    const MQTT_HOST = "wss://ecc7980f7b0c433fbf4b63748514aa36.s1.eu.hivemq.cloud:8884/mqtt";
+    const MQTT_USER = "GellaAWS";
+    const MQTT_PASS = "ee3ca6sp#gella"; // Substitua pela sua senha real
+
+    const estadoFreezers = {}; 
+
+    const client = mqtt.connect(MQTT_HOST, {
+      username: MQTT_USER,
+      password: MQTT_PASS,
+      clientId: 'web_app_' + Math.random().toString(16).substr(2, 8)
+    });
+
+    const statusDiv = document.getElementById('connection-status');
+
+    client.on('connect', () => {
+      statusDiv.innerText = "● Sistema Online";
+      statusDiv.style.backgroundColor = "rgba(40, 167, 69, 0.4)";
+      client.subscribe('sorveteria/#');
+    });
+
+    client.on('error', () => {
+      statusDiv.innerText = "✕ Falha na Conexão";
+      statusDiv.style.backgroundColor = "rgba(227, 6, 19, 0.4)";
+    });
+
+    // ---------- PERMISSÕES E DISPARO DE NOTIFICAÇÃO ----------
+    function requestNotificationPermission() {
+      if ("Notification" in window) {
+        Notification.requestPermission().then(permission => {
+          if (permission === "granted") {
+            document.getElementById('notif-btn').style.display = 'none';
+            sendPushNotification("Nevaska IoT", "Notificações ativadas com sucesso!");
+          } else {
+            alert("As notificações foram bloqueadas nas configurações do navegador.");
+          }
+        });
+      } else {
+        alert("Este navegador não suporta notificações de sistema.");
+      }
+    }
+
+    function sendPushNotification(titulo, mensagem) {
+      if ("Notification" in window && Notification.permission === "granted") {
+        const options = {
+          body: mensagem,
+          vibrate: [200, 100, 200],
+          requireInteraction: true
+        };
+
+        // Disparo prioritário via Service Worker (compatível com PWA e iOS na Tela de Início)
+        if (swRegistration && swRegistration.showNotification) {
+          swRegistration.showNotification(titulo, options);
+        } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+          navigator.serviceWorker.ready.then(reg => reg.showNotification(titulo, options));
+        } else {
+          new Notification(titulo, options);
+        }
+      }
+    }
+
+    // ---------- NAVEGAÇÃO ENTRE ABAS ----------
+    function switchStore(storeId, evt) {
+      document.querySelectorAll('.store-section').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      
+      const targetSection = document.getElementById(storeId);
+      if (targetSection) targetSection.classList.add('active');
+      if (evt && evt.currentTarget) evt.currentTarget.classList.add('active');
+    }
+
+    // ---------- RECEBIMENTO E ATUALIZAÇÃO VIA MQTT ----------
+    client.on('message', (topic, message) => {
+      const parts = topic.split('/'); // sorveteria / {loja} / {freezer} / {tipo}
+      if (parts.length < 4) return;
+
+      const loja = parts[1];    // Ex: "NEVASKA_SC"
+      const freezer = parts[2]; // Ex: "freezer_01"
+      const tipo = parts[3];    // Ex: "temperatura" ou "status"
+      const valor = message.toString();
+
+      updateFreezerCard(loja, freezer, tipo, valor);
+    });
+
+    function updateFreezerCard(loja, freezer, tipo, valor) {
+      const container = document.getElementById(`cards-${loja}`);
+      if (!container) return;
+
+      const emptyP = container.querySelector('.empty-msg');
+      if (emptyP) emptyP.remove();
+
+      const cardId = `card-${loja}-${freezer}`;
+      const nomeLojaFormatado = loja.replace('NEVASKA_', '').replace('_', ' ');
+      const nomeFreezerFormatado = freezer.replace('_', ' ').toUpperCase();
+      
+      let card = document.getElementById(cardId);
+
+      if (!card) {
+        card = document.createElement('div');
+        card.id = cardId;
+        card.className = 'freezer-card ok';
+        card.innerHTML = `
+          <div class="card-header">
+            <span class="card-title">${nomeFreezerFormatado}</span>
+            <span class="status-badge online" id="status-${cardId}">ONLINE</span>
+          </div>
+          <div class="card-body">
+            <div>
+              <div class="temp-display ok" id="temp-${cardId}">-- °C</div>
+            </div>
+            <i class="fa-solid fa-snowflake temp-icon"></i>
+          </div>
+          <div class="card-footer" id="time-${cardId}">Atualizado agora</div>
+        `;
+        container.appendChild(card);
+      }
+
+      if (!estadoFreezers[cardId]) {
+        estadoFreezers[cardId] = { tempAlert: false, offlineAlert: false };
+      }
+
+      if (tipo === 'temperatura') {
+        const tempVal = parseFloat(valor);
+        const tempEl = document.getElementById(`temp-${cardId}`);
+        tempEl.innerText = `${tempVal.toFixed(1)} °C`;
+
+        // Limite de teste: > 29.9°C
+        if (tempVal > 29.9) {
+          card.className = 'freezer-card alert';
+          tempEl.className = 'temp-display alert';
+          
+          if (!estadoFreezers[cardId].tempAlert) {
+            sendPushNotification(`🚨 ALERTA DE TEMPERATURA: ${nomeLojaFormatado}`, `O ${nomeFreezerFormatado} subiu para ${tempVal.toFixed(1)}°C!`);
+            estadoFreezers[cardId].tempAlert = true;
+          }
+        } else {
+          card.className = 'freezer-card ok';
+          tempEl.className = 'temp-display ok';
+          estadoFreezers[cardId].tempAlert = false;
+        }
+        document.getElementById(`time-${cardId}`).innerText = `Última leitura: ${new Date().toLocaleTimeString()}`;
+      } 
+      else if (tipo === 'status') {
+        const statusEl = document.getElementById(`status-${cardId}`);
+        if (valor === 'offline') {
+          statusEl.innerText = 'ENERGIA / Queda';
+          statusEl.className = 'status-badge offline';
+          card.className = 'freezer-card alert';
+          
+          if (!estadoFreezers[cardId].offlineAlert) {
+            sendPushNotification(`⚡ QUEDA DE ENERGIA: ${nomeLojaFormatado}`, `O ${nomeFreezerFormatado} perdeu a conexão/energia!`);
+            estadoFreezers[cardId].offlineAlert = true;
+          }
+        } else {
+          statusEl.innerText = 'ONLINE';
+          statusEl.className = 'status-badge online';
+          estadoFreezers[cardId].offlineAlert = false;
+        }
+      }
+    }
+
+    window.addEventListener('load', () => {
+      if ("Notification" in window && Notification.permission === "granted") {
+        document.getElementById('notif-btn').style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
