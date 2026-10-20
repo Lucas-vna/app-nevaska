@@ -2,438 +2,353 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Nevaska - Monitoramento de Freezers</title>
-  <link rel="manifest" href="data:application/json;base64,ewogICJuYW1lIjogIk5ldmFza2EgTW9uaXRvcmFtZW50byIsCiAgInNob3J0X25hbWUiOiAiTmV2YXNrYSIsCiAgInN0YXJ0X3VybCI6ICIuLyIsCiAgImRpc3BsYXkiOiAic3RhbmRhbG9uZSIsCiAgImJhY2tncm91bmRfY29sb3IiOiAiI0VCRjZGQyIsCiAgInRoZW1lX2NvbG9yIjogIiMwMEEzRTAiCiB9">
-  
-  <!-- Biblioteca MQTT via WebSockets e Ícones -->
+
+  <!-- PWA: manifest e ícones REAIS (manifest em data: URL não funciona bem para instalar no iPhone) -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#00A3E0">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Nevaska">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-  
   <style>
-    :root {
-      --azul-nevaska: #00A3E0;
-      --amarelo-nevaska: #FFD100;
-      --vermelho-alerta: #E30613;
-      --verde-ok: #28a745;
-      --fundo-gelo: #EBF6FC;
-      --texto-escuro: #1A2B3C;
-    }
-
-    * { 
-      box-sizing: border-box; 
-      margin: 0; 
-      padding: 0; 
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-    }
-    
-    body { 
-      background-color: var(--fundo-gelo); 
-      color: var(--texto-escuro); 
-      padding-bottom: 30px; 
-    }
-
-    header {
-      background: linear-gradient(135deg, var(--azul-nevaska), #0077A8);
-      color: white; 
-      padding: 20px; 
-      text-align: center;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.15); 
-      border-bottom: 4px solid var(--amarelo-nevaska);
-    }
-    
-    header h1 { 
-      font-size: 1.8rem; 
-      font-weight: 800; 
-      letter-spacing: 1px; 
-    }
-    
-    header p { 
-      font-size: 0.9rem; 
-      opacity: 0.9; 
-      margin-top: 4px; 
-    }
-
-    #connection-status {
-      display: inline-block; 
-      margin-top: 10px; 
-      padding: 4px 12px;
-      border-radius: 20px; 
-      font-size: 0.8rem; 
-      font-weight: bold; 
-      background-color: rgba(255, 255, 255, 0.2);
-    }
-
-    .notif-banner {
-      background-color: var(--amarelo-nevaska); 
-      color: #333; 
-      text-align: center; 
-      padding: 12px;
-      font-weight: bold; 
-      font-size: 0.9rem; 
-      cursor: pointer; 
-      display: flex; 
-      align-items: center; 
-      justify-content: center; 
-      gap: 8px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-    }
-
-    .store-tabs { 
-      display: flex; 
-      justify-content: center; 
-      gap: 10px; 
-      margin: 20px auto; 
-      max-width: 500px; 
-      padding: 0 15px; 
-    }
-    
-    .tab-btn {
-      flex: 1; 
-      padding: 12px 15px; 
-      border: 2px solid var(--azul-nevaska); 
-      background-color: white; 
-      color: var(--azul-nevaska);
-      font-weight: bold; 
-      font-size: 1rem; 
-      border-radius: 12px; 
-      cursor: pointer; 
-      transition: all 0.3s ease; 
-      display: flex; 
-      align-items: center; 
-      justify-content: center; 
-      gap: 8px;
-    }
-    
-    .tab-btn.active { 
-      background-color: var(--azul-nevaska); 
-      color: white; 
-      box-shadow: 0 4px 8px rgba(0, 163, 224, 0.3); 
-    }
-
-    .container { 
-      max-width: 600px; 
-      margin: 0 auto; 
-      padding: 0 15px; 
-    }
-    
-    .store-section { 
-      display: none; 
-    }
-    
-    .store-section.active { 
-      display: block; 
-    }
-
-    .freezer-card {
-      background: white; 
-      border-radius: 16px; 
-      padding: 20px; 
-      margin-bottom: 15px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.06); 
-      border-left: 6px solid #ccc; 
-      transition: transform 0.2s ease; 
-    }
-    
-    .freezer-card.ok { 
-      border-left-color: var(--verde-ok); 
-    }
-    
-    .freezer-card.alert { 
-      border-left-color: var(--vermelho-alerta); 
-      background-color: #FFF5F5; 
-    }
-
-    .card-header { 
-      display: flex; 
-      justify-content: space-between; 
-      align-items: center; 
-      margin-bottom: 15px; 
-    }
-    
-    .card-title { 
-      font-size: 1.2rem; 
-      font-weight: bold; 
-      color: var(--texto-escuro); 
-    }
-    
-    .status-badge { 
-      font-size: 0.75rem; 
-      font-weight: bold; 
-      padding: 4px 8px; 
-      border-radius: 8px; 
-      text-transform: uppercase;
-    }
-    
-    .status-badge.online { 
-      background-color: #E6F4EA; 
-      color: var(--verde-ok); 
-    }
-    
-    .status-badge.offline { 
-      background-color: #FCE8E6; 
-      color: var(--vermelho-alerta); 
-    }
-
-    .card-body { 
-      display: flex; 
-      align-items: center; 
-      justify-content: space-between; 
-    }
-    
-    .temp-display { 
-      font-size: 2.5rem; 
-      font-weight: 800; 
-    }
-    
-    .temp-display.ok { 
-      color: var(--verde-ok); 
-    }
-    
-    .temp-display.alert { 
-      color: var(--vermelho-alerta); 
-    }
-    
-    .temp-icon { 
-      font-size: 2.2rem; 
-      color: var(--azul-nevaska); 
-    }
-    
-    .card-footer { 
-      margin-top: 10px; 
-      font-size: 0.75rem; 
-      color: #777; 
-      text-align: right; 
-    }
-
-    .empty-msg {
-      text-align: center; 
-      color: #777; 
-      margin-top: 30px;
-      font-size: 0.95rem;
-    }
+    :root { --azul-nevaska: #00A3E0; --amarelo-nevaska: #FFD100; --vermelho-alerta: #E30613; --verde-ok: #28a745; --cinza-off: #8a94a0; --fundo-gelo: #EBF6FC; --texto-escuro: #1A2B3C; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    body { background-color: var(--fundo-gelo); color: var(--texto-escuro); padding-bottom: 30px; }
+    header { background: linear-gradient(135deg, var(--azul-nevaska), #0077A8); color: white; padding: 20px; padding-top: max(20px, env(safe-area-inset-top)); text-align: center; border-bottom: 4px solid var(--amarelo-nevaska); }
+    .header-pills { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .pill { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: bold; background-color: rgba(255, 255, 255, 0.2); }
+    .pill.ruim { background-color: rgba(227, 6, 19, 0.85); }
+    #pill-alertas { display: none; }
+    .notif-banner { background-color: var(--amarelo-nevaska); color: #333; text-align: center; padding: 12px 16px; font-weight: bold; display: none; align-items: center; justify-content: center; gap: 8px; line-height: 1.4; }
+    .notif-banner.clicavel { cursor: pointer; }
+    .notif-banner.erro { background-color: #FCE8E6; color: var(--vermelho-alerta); }
+    .notif-banner small { display: block; font-weight: normal; font-size: 0.85rem; }
+    .store-tabs { display: flex; justify-content: center; gap: 10px; margin: 20px auto; max-width: 500px; padding: 0 15px; }
+    .tab-btn { flex: 1; padding: 12px 15px; border: 2px solid var(--azul-nevaska); background-color: white; color: var(--azul-nevaska); font-weight: bold; border-radius: 12px; cursor: pointer; }
+    .tab-btn.active { background-color: var(--azul-nevaska); color: white; }
+    .container { max-width: 600px; margin: 0 auto; padding: 0 15px; }
+    .store-section { display: none; }
+    .store-section.active { display: block; }
+    .vazio { text-align: center; color: #777; padding: 30px 10px; font-size: 0.9rem; }
+    .freezer-card { background: white; border-radius: 16px; padding: 20px; margin-bottom: 15px; border-left: 6px solid #ccc; }
+    .freezer-card.ok { border-left-color: var(--verde-ok); }
+    .freezer-card.alert { border-left-color: var(--vermelho-alerta); background-color: #FFF5F5; }
+    .freezer-card.off { border-left-color: var(--cinza-off); background-color: #F4F5F7; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+    .card-title { font-size: 1.2rem; font-weight: bold; }
+    .status-badge { font-size: 0.75rem; font-weight: bold; padding: 4px 8px; border-radius: 8px; text-transform: uppercase; }
+    .status-badge.online { background-color: #E6F4EA; color: var(--verde-ok); }
+    .status-badge.offline { background-color: #FCE8E6; color: var(--vermelho-alerta); }
+    .card-body { display: flex; align-items: center; justify-content: space-between; }
+    .temp-display { font-size: 2.5rem; font-weight: 800; }
+    .temp-display.ok { color: var(--verde-ok); }
+    .temp-display.alert { color: var(--vermelho-alerta); }
+    .temp-display.off { color: var(--cinza-off); }
+    .temp-limite { font-size: 0.75rem; color: #777; margin-top: 2px; }
+    .temp-icon { font-size: 2.2rem; color: var(--azul-nevaska); }
+    .card-footer { margin-top: 10px; font-size: 0.75rem; color: #777; text-align: right; }
   </style>
 </head>
 <body>
-
   <header>
     <h1>NEVASKA</h1>
     <p>Monitoramento de Freezers</p>
-    <div id="connection-status">Conectando ao HiveMQ...</div>
+    <div class="header-pills">
+      <span id="connection-status" class="pill">Conectando ao HiveMQ...</span>
+      <span id="pill-alertas" class="pill"><i class="fa-solid fa-bell"></i> Alertas ativos</span>
+    </div>
   </header>
 
-  <!-- Banner de Notificações -->
-  <div id="notif-btn" class="notif-banner" onclick="requestNotificationPermission()">
-    <i class="fa-solid fa-bell"></i> Clique aqui para ATIVAR NOTIFICAÇÕES DE ALERTA no celular
-  </div>
+  <!-- Banner muda de texto conforme a situação do celular (ver iniciarNotificacoes) -->
+  <div id="notif-btn" class="notif-banner"></div>
 
-  <!-- Abas de Lojas -->
   <div class="store-tabs">
-    <button class="tab-btn active" onclick="switchStore('NEVASKA_SC', event)">
-      <i class="fa-solid fa-store"></i> Santa Cruz
-    </button>
-    <button class="tab-btn" onclick="switchStore('NEVASKA_BERNARDINO', event)">
-      <i class="fa-solid fa-store"></i> Bernardino
-    </button>
+    <button class="tab-btn active" onclick="switchStore('NEVASKA_SC', event)"><i class="fa-solid fa-store"></i> Santa Cruz</button>
+    <button class="tab-btn" onclick="switchStore('NEVASKA_BERNARDINO', event)"><i class="fa-solid fa-store"></i> Bernardino</button>
   </div>
-
   <div class="container">
-    <!-- Seção Santa Cruz -->
-    <div id="NEVASKA_SC" class="store-section active">
-      <div id="cards-NEVASKA_SC">
-        <p class="empty-msg">Aguardando dados dos freezers de Santa Cruz...</p>
-      </div>
-    </div>
-
-    <!-- Seção Bernardino -->
-    <div id="NEVASKA_BERNARDINO" class="store-section">
-      <div id="cards-NEVASKA_BERNARDINO">
-        <p class="empty-msg">Aguardando dados dos freezers de Bernardino...</p>
-      </div>
-    </div>
+    <div id="NEVASKA_SC" class="store-section active"><div id="cards-NEVASKA_SC"><p class="vazio">Aguardando dados dos freezers...</p></div></div>
+    <div id="NEVASKA_BERNARDINO" class="store-section"><div id="cards-NEVASKA_BERNARDINO"><p class="vazio">Aguardando dados dos freezers...</p></div></div>
   </div>
 
   <script>
-    // ---------- REGISTRO DO SERVICE WORKER (PWA) ----------
+    // =========================================================================
+    // ARQUITETURA (resumo)
+    // - Este painel serve só para VISUALIZAR em tempo real (MQTT via WebSocket).
+    // - Os ALERTAS não dependem mais do painel aberto: quem decide e dispara é o
+    //   servidor (/api/telemetria + /api/watchdog), via Web Push + Telegram.
+    // - Por isso o painel não gera notificação local de alerta (evita duplicar).
+    // =========================================================================
+
+    // ---------- Configuração do MQTT (somente leitura) -----------------------
+    // ATENÇÃO: tudo que está neste arquivo é público. Crie no HiveMQ Cloud uma
+    // credencial SÓ com permissão de SUBSCRIBE em "sorveteria/#" para o painel.
+    // Nunca use aqui a mesma credencial que o ESP32 usa para publicar.
+    const MQTT_HOST = "wss://ecc7980f7b0c433fbf4b63748514aa36.s1.eu.hivemq.cloud:8884/mqtt";
+    const MQTT_USER = "painel_leitura";
+    const MQTT_PASS = "SENHA_DA_CREDENCIAL_SOMENTE_LEITURA";
+
+    // Valores padrão; são substituídos pelos do servidor em /api/config.
+    let CFG = { vapidPublicKey: null, limiteTemp: -12, limitesPorFreezer: {}, offlineMin: 3 };
+
+    const estadoFreezers = {}; // cardId -> { ultimaMsg, statusMqtt, temp }
     let swRegistration = null;
 
-    if ('serviceWorker' in navigator) {
-      const swCode = `
-        self.addEventListener('install', e => self.skipWaiting());
-        self.addEventListener('activate', e => self.clients.claim());
-      `;
-      const blob = new Blob([swCode], { type: 'application/javascript' });
-      const swUrl = URL.createObjectURL(blob);
+    // =========================================================================
+    // 1) NOTIFICAÇÕES PUSH (Web Push com VAPID)
+    // =========================================================================
+    const ehIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const ehStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    const suportaPush = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
-      navigator.serviceWorker.register(swUrl).then(reg => {
-        swRegistration = reg;
-      }).catch(err => console.log('SW Erro:', err));
+    function mostrarBanner(html, { clique = null, erro = false } = {}) {
+      const el = document.getElementById('notif-btn');
+      el.innerHTML = html;
+      el.style.display = 'flex';
+      el.classList.toggle('clicavel', !!clique);
+      el.classList.toggle('erro', erro);
+      el.onclick = clique;
+    }
+    function esconderBanner() {
+      document.getElementById('notif-btn').style.display = 'none';
+    }
+    function marcarAlertasAtivos(ativo) {
+      document.getElementById('pill-alertas').style.display = ativo ? 'inline-block' : 'none';
     }
 
-    // ---------- CONFIGURAÇÕES HIVEMQ (WEBSOCKETS SSL) ----------
-    const MQTT_HOST = "wss://ecc7980f7b0c433fbf4b63748514aa36.s1.eu.hivemq.cloud:8884/mqtt";
-    const MQTT_USER = "GellaAWS";
-    const MQTT_PASS = "ee3ca6sp#gella"; // Substitua pela sua senha real
+    async function carregarConfig() {
+      try {
+        const r = await fetch('/api/config', { cache: 'no-store' });
+        if (r.ok) CFG = { ...CFG, ...(await r.json()) };
+      } catch (e) { console.warn('Sem /api/config, usando padrões', e); }
+    }
 
-    const estadoFreezers = {}; 
+    function base64UrlParaUint8(base64Url) {
+      const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
+      const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const bruto = atob(base64);
+      return Uint8Array.from([...bruto].map(c => c.charCodeAt(0)));
+    }
+
+    async function enviarInscricaoAoServidor(inscricao, confirmar) {
+      const r = await fetch('/api/inscrever', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: inscricao.toJSON(), confirmar })
+      });
+      if (!r.ok) throw new Error('Servidor recusou a inscrição (' + r.status + ')');
+    }
+
+    async function iniciarNotificacoes() {
+      // iPhone: push só existe com o app ABERTO PELO ÍCONE da Tela de Início (iOS 16.4+).
+      if (ehIOS && !ehStandalone) {
+        mostrarBanner(`<i class="fa-solid fa-mobile-screen"></i><span>Para receber alertas no iPhone:<small>toque em <i class="fa-solid fa-arrow-up-from-bracket"></i> Compartilhar → <b>Adicionar à Tela de Início</b> e abra o Nevaska pelo ícone.</small></span>`);
+        return;
+      }
+      if (!suportaPush) {
+        mostrarBanner(`<i class="fa-solid fa-triangle-exclamation"></i><span>Este navegador não suporta notificações push.<small>No Android use o Chrome; no iPhone, iOS 16.4 ou mais recente.</small></span>`, { erro: true });
+        return;
+      }
+
+      try {
+        swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+      } catch (e) {
+        mostrarBanner('<i class="fa-solid fa-triangle-exclamation"></i> Falha ao registrar o service worker.', { erro: true });
+        console.error(e);
+        return;
+      }
+
+      if (Notification.permission === 'denied') {
+        mostrarBanner(`<i class="fa-solid fa-bell-slash"></i><span>Notificações bloqueadas neste celular.<small>Libere em Configurações → Notificações → Nevaska (ou nas configurações do site no Chrome) e recarregue.</small></span>`, { erro: true });
+        return;
+      }
+
+      const atual = await swRegistration.pushManager.getSubscription();
+      if (atual && Notification.permission === 'granted') {
+        // Reenvia sempre: se o servidor perdeu a inscrição, ela se recupera sozinha.
+        enviarInscricaoAoServidor(atual, false).catch(console.error);
+        esconderBanner();
+        marcarAlertasAtivos(true);
+        return;
+      }
+
+      mostrarBanner('<i class="fa-solid fa-bell"></i> Toque aqui para ATIVAR OS ALERTAS neste celular', { clique: ativarAlertas });
+    }
+
+    async function ativarAlertas() {
+      // No iOS o pedido de permissão PRECISA ser a primeira coisa do toque do usuário.
+      const permissao = await Notification.requestPermission();
+      if (permissao !== 'granted') {
+        mostrarBanner('<i class="fa-solid fa-bell-slash"></i> Permissão negada. Os alertas não vão chegar neste celular.', { erro: true });
+        return;
+      }
+      mostrarBanner('<i class="fa-solid fa-spinner fa-spin"></i> Ativando alertas...');
+      try {
+        if (!CFG.vapidPublicKey) await carregarConfig();
+        if (!CFG.vapidPublicKey) throw new Error('Chave VAPID não configurada no servidor');
+        const reg = swRegistration || await navigator.serviceWorker.ready;
+        const inscricao = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: base64UrlParaUint8(CFG.vapidPublicKey)
+        });
+        await enviarInscricaoAoServidor(inscricao, true); // servidor manda push de confirmação
+        esconderBanner();
+        marcarAlertasAtivos(true);
+      } catch (e) {
+        console.error(e);
+        mostrarBanner(`<i class="fa-solid fa-triangle-exclamation"></i><span>Não foi possível ativar.<small>${e.message}. Toque para tentar de novo.</small></span>`, { clique: ativarAlertas, erro: true });
+      }
+    }
+
+    // =========================================================================
+    // 2) PAINEL EM TEMPO REAL (MQTT)
+    // =========================================================================
+    function switchStore(storeId, evt) {
+      document.querySelectorAll('.store-section').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+      document.getElementById(storeId).classList.add('active');
+      if (evt) evt.currentTarget.classList.add('active');
+    }
+
+    function definirStatusConexao(texto, ruim) {
+      const el = document.getElementById('connection-status');
+      el.textContent = texto;
+      el.classList.toggle('ruim', !!ruim);
+    }
 
     const client = mqtt.connect(MQTT_HOST, {
       username: MQTT_USER,
       password: MQTT_PASS,
-      clientId: 'web_app_' + Math.random().toString(16).substr(2, 8)
+      clientId: 'web_' + Math.random().toString(16).slice(2, 10),
+      reconnectPeriod: 3000,
+      connectTimeout: 10000,
+      clean: true
+    });
+    client.on('connect', () => { definirStatusConexao('● Sistema Online'); client.subscribe('sorveteria/#'); });
+    client.on('reconnect', () => definirStatusConexao('Reconectando...', true));
+    client.on('offline', () => definirStatusConexao('● Sem conexão com o servidor', true));
+    client.on('error', (e) => { console.error('MQTT', e); definirStatusConexao('● Erro de conexão', true); });
+
+    // Ao voltar para o app (desbloqueou a tela), reconecta na hora em vez de esperar.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !client.connected) client.reconnect();
     });
 
-    const statusDiv = document.getElementById('connection-status');
-
-    client.on('connect', () => {
-      statusDiv.innerText = "● Sistema Online";
-      statusDiv.style.backgroundColor = "rgba(40, 167, 69, 0.4)";
-      client.subscribe('sorveteria/#');
-    });
-
-    client.on('error', () => {
-      statusDiv.innerText = "✕ Falha na Conexão";
-      statusDiv.style.backgroundColor = "rgba(227, 6, 19, 0.4)";
-    });
-
-    // ---------- PERMISSÕES E DISPARO DE NOTIFICAÇÃO ----------
-    function requestNotificationPermission() {
-      if ("Notification" in window) {
-        Notification.requestPermission().then(permission => {
-          if (permission === "granted") {
-            document.getElementById('notif-btn').style.display = 'none';
-            sendPushNotification("Nevaska IoT", "Notificações ativadas com sucesso! Teste de alerta.");
-          } else {
-            alert("As notificações foram bloqueadas nas configurações do navegador.");
-          }
-        });
-      } else {
-        alert("Este navegador não suporta notificações de sistema.");
-      }
-    }
-
-    function sendPushNotification(titulo, mensagem) {
-      if ("Notification" in window && Notification.permission === "granted") {
-        const options = {
-          body: mensagem,
-          vibrate: [200, 100, 200],
-          requireInteraction: true
-        };
-
-        if (swRegistration && swRegistration.showNotification) {
-          swRegistration.showNotification(titulo, options);
-        } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-          navigator.serviceWorker.ready.then(reg => reg.showNotification(titulo, options));
-        } else {
-          new Notification(titulo, options);
-        }
-      }
-    }
-
-    // ---------- NAVEGAÇÃO ENTRE ABAS ----------
-    function switchStore(storeId, evt) {
-      document.querySelectorAll('.store-section').forEach(el => el.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-      
-      const targetSection = document.getElementById(storeId);
-      if (targetSection) targetSection.classList.add('active');
-      if (evt && evt.currentTarget) evt.currentTarget.classList.add('active');
-    }
-
-    // ---------- RECEBIMENTO E ATUALIZAÇÃO VIA MQTT ----------
     client.on('message', (topic, message) => {
-      const parts = topic.split('/'); // sorveteria / {loja} / {freezer} / {tipo}
+      const parts = topic.split('/');
       if (parts.length < 4) return;
-
-      const loja = parts[1];    // Ex: "NEVASKA_SC"
-      const freezer = parts[2]; // Ex: "freezer_01"
-      const tipo = parts[3];    // Ex: "temperatura" ou "status"
-      const valor = message.toString();
-
-      updateFreezerCard(loja, freezer, tipo, valor);
+      updateFreezerCard(parts[1], parts[2], parts[3], message.toString());
     });
+
+    function limiteDe(loja, freezer) {
+      const especifico = CFG.limitesPorFreezer?.[`${loja}/${freezer}`];
+      return (especifico !== undefined && especifico !== null && especifico !== '') ? Number(especifico) : Number(CFG.limiteTemp);
+    }
+
+    // Cria o card com createElement/textContent (nada de innerHTML com dados do broker).
+    function criarCard(loja, freezer, cardId, container) {
+      container.querySelector('.vazio')?.remove();
+      const card = document.createElement('div');
+      card.id = cardId;
+      card.className = 'freezer-card ok';
+
+      const header = document.createElement('div'); header.className = 'card-header';
+      const titulo = document.createElement('span'); titulo.className = 'card-title'; titulo.textContent = freezer.replace(/_/g, ' ').toUpperCase();
+      const badge = document.createElement('span'); badge.className = 'status-badge online'; badge.id = `status-${cardId}`; badge.textContent = 'ONLINE';
+      header.append(titulo, badge);
+
+      const body = document.createElement('div'); body.className = 'card-body';
+      const col = document.createElement('div');
+      const temp = document.createElement('div'); temp.className = 'temp-display ok'; temp.id = `temp-${cardId}`; temp.textContent = '-- °C';
+      const lim = document.createElement('div'); lim.className = 'temp-limite'; lim.textContent = `Alerta acima de ${limiteDe(loja, freezer).toFixed(1)} °C`;
+      col.append(temp, lim);
+      const icone = document.createElement('i'); icone.className = 'fa-solid fa-snowflake temp-icon';
+      body.append(col, icone);
+
+      const footer = document.createElement('div'); footer.className = 'card-footer'; footer.id = `time-${cardId}`; footer.textContent = 'Aguardando leitura';
+      card.append(header, body, footer);
+      container.appendChild(card);
+      return card;
+    }
 
     function updateFreezerCard(loja, freezer, tipo, valor) {
       const container = document.getElementById(`cards-${loja}`);
       if (!container) return;
-
-      const emptyP = container.querySelector('.empty-msg');
-      if (emptyP) emptyP.remove();
-
       const cardId = `card-${loja}-${freezer}`;
-      const nomeLojaFormatado = loja.replace('NEVASKA_', '').replace('_', ' ');
-      const nomeFreezerFormatado = freezer.replace('_', ' ').toUpperCase();
-      
-      let card = document.getElementById(cardId);
+      const card = document.getElementById(cardId) || criarCard(loja, freezer, cardId, container);
+      const est = estadoFreezers[cardId] ||= { ultimaMsg: 0, statusMqtt: 'online', temp: null, loja, freezer };
 
-      if (!card) {
-        card = document.createElement('div');
-        card.id = cardId;
-        card.className = 'freezer-card ok';
-        card.innerHTML = `
-          <div class="card-header">
-            <span class="card-title">${nomeFreezerFormatado}</span>
-            <span class="status-badge online" id="status-${cardId}">ONLINE</span>
-          </div>
-          <div class="card-body">
-            <div>
-              <div class="temp-display ok" id="temp-${cardId}">-- °C</div>
-            </div>
-            <i class="fa-solid fa-snowflake temp-icon"></i>
-          </div>
-          <div class="card-footer" id="time-${cardId}">Atualizado agora</div>
-        `;
-        container.appendChild(card);
-      }
-
-      if (!estadoFreezers[cardId]) {
-        estadoFreezers[cardId] = { tempAlert: false, offlineAlert: false };
+      if (tipo === 'status') {
+        est.statusMqtt = valor.trim().toLowerCase() === 'offline' ? 'offline' : 'online';
+        if (est.statusMqtt === 'online') est.ultimaMsg = Date.now();
       }
 
       if (tipo === 'temperatura') {
-        const tempVal = parseFloat(valor);
-        const tempEl = document.getElementById(`temp-${cardId}`);
-        tempEl.innerText = `${tempVal.toFixed(1)} °C`;
-
-        // Limite de teste: > 29.9°C
-        if (tempVal > 29.9) {
-          card.className = 'freezer-card alert';
-          tempEl.className = 'temp-display alert';
-          
-          if (!estadoFreezers[cardId].tempAlert) {
-            sendPushNotification(`🚨 ALERTA DE TEMPERATURA: ${nomeLojaFormatado}`, `O ${nomeFreezerFormatado} subiu para ${tempVal.toFixed(1)}°C!`);
-            estadoFreezers[cardId].tempAlert = true;
-          }
-        } else {
-          card.className = 'freezer-card ok';
-          tempEl.className = 'temp-display ok';
-          estadoFreezers[cardId].tempAlert = false;
-        }
-        document.getElementById(`time-${cardId}`).innerText = `Última leitura: ${new Date().toLocaleTimeString()}`;
-      } 
-      else if (tipo === 'status') {
-        const statusEl = document.getElementById(`status-${cardId}`);
-        if (valor === 'offline') {
-          statusEl.innerText = 'ENERGIA / Queda';
-          statusEl.className = 'status-badge offline';
-          card.className = 'freezer-card alert';
-          
-          if (!estadoFreezers[cardId].offlineAlert) {
-            sendPushNotification(`⚡ QUEDA DE ENERGIA: ${nomeLojaFormatado}`, `O ${nomeFreezerFormatado} perdeu a conexão/energia!`);
-            estadoFreezers[cardId].offlineAlert = true;
-          }
-        } else {
-          statusEl.innerText = 'ONLINE';
-          statusEl.className = 'status-badge online';
-          estadoFreezers[cardId].offlineAlert = false;
-        }
+        const t = parseFloat(valor);
+        est.temp = Number.isFinite(t) ? t : NaN;
+        est.ultimaMsg = Date.now();
+        est.statusMqtt = 'online';
+        document.getElementById(`time-${cardId}`).textContent =
+          'Atualizado às ' + new Date().toLocaleTimeString('pt-BR');
       }
+      renderizarCard(cardId);
     }
 
-    window.addEventListener('load', () => {
-      if ("Notification" in window && Notification.permission === "granted") {
-        document.getElementById('notif-btn').style.display = 'none';
+    function renderizarCard(cardId) {
+      const est = estadoFreezers[cardId];
+      const card = document.getElementById(cardId);
+      if (!est || !card) return;
+      const tempEl = document.getElementById(`temp-${cardId}`);
+      const badge = document.getElementById(`status-${cardId}`);
+      card.querySelector('.temp-limite').textContent = `Alerta acima de ${limiteDe(est.loja, est.freezer).toFixed(1)} °C`;
+
+      const semDados = est.ultimaMsg && (Date.now() - est.ultimaMsg > CFG.offlineMin * 60000);
+      const offline = est.statusMqtt === 'offline' || semDados;
+
+      if (offline) {
+        card.className = 'freezer-card off';
+        tempEl.className = 'temp-display off';
+        badge.className = 'status-badge offline';
+        badge.textContent = est.statusMqtt === 'offline' ? 'OFFLINE' : 'SEM DADOS';
+        return;
       }
+
+      badge.className = 'status-badge online';
+      badge.textContent = 'ONLINE';
+
+      if (est.temp === null) return;
+      if (Number.isNaN(est.temp)) {
+        tempEl.textContent = 'ERRO';
+        card.className = 'freezer-card alert';
+        tempEl.className = 'temp-display alert';
+        badge.textContent = 'SENSOR';
+        badge.className = 'status-badge offline';
+        return;
+      }
+
+      tempEl.textContent = `${est.temp.toFixed(1)} °C`;
+      const emAlerta = est.temp > limiteDe(est.loja, est.freezer);
+      card.className = emAlerta ? 'freezer-card alert' : 'freezer-card ok';
+      tempEl.className = emAlerta ? 'temp-display alert' : 'temp-display ok';
+    }
+
+    // Reavalia os cards a cada 15 s (para marcar "SEM DADOS" se o freezer sumir).
+    setInterval(() => Object.keys(estadoFreezers).forEach(renderizarCard), 15000);
+
+    // =========================================================================
+    // Início
+    // =========================================================================
+    carregarConfig().then(() => {
+      Object.keys(estadoFreezers).forEach(renderizarCard);
+      iniciarNotificacoes();
     });
   </script>
 </body>

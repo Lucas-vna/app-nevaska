@@ -1,0 +1,18 @@
+{
+  "name": "nevaska-monitoramento",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dashboard + alertas em segundo plano (Web Push, Telegram, Pushover) para os freezers Nevaska",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "vapid": "web-push generate-vapid-keys"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.39.0",
+    "web-push": "^3.6.7"
+  }
+}

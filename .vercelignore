@@ -1,0 +1,5 @@
+# Arquivos que vão para o Git mas NÃO devem ser publicados no site.
+# Sem isto, /firmware/... e /README.md ficariam acessíveis pela URL pública.
+firmware/
+tests/
+README.md

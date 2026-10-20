@@ -1,0 +1,14 @@
+# Dependências (a Vercel instala sozinha no deploy)
+node_modules/
+
+# Variáveis de ambiente locais — segredos ficam na Vercel, nunca no Git
+.env
+.env.*
+
+# Pasta local da Vercel CLI
+.vercel/
+
+# Sistema operacional / editores
+.DS_Store
+Thumbs.db
+.vscode/
