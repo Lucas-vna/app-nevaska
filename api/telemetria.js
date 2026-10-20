@@ -58,7 +58,14 @@ export default async function handler(req, res) {
       console.error('[telemetria] watchdog de carona falhou:', err.message);
     }
 
-    return res.status(200).json({ ok: true, eventos: eventos.map((e) => e.tipo), watchdog: watchdog?.executado || false });
+    // "limite" volta para o ESP32 usar no display e nos LEDs: assim o limite de
+    // alerta é configurado num lugar só (LIMITE_TEMP_C na Vercel).
+    return res.status(200).json({
+      ok: true,
+      limite: limiteDe(id),
+      eventos: eventos.map((e) => e.tipo),
+      watchdog: watchdog?.executado || false,
+    });
   } catch (err) {
     console.error('[telemetria] erro:', err);
     return res.status(500).json({ erro: 'Falha interna' });

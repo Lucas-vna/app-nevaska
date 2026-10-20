@@ -1,148 +1,216 @@
 /* =============================================================================
- * Nevaska — Firmware do ESP32 (sensor NTC de freezer)
+ * Nevaska — Firmware do ESP32 (sensor DS18B20 + display OLED + LEDs)
+ *
+ * Baseado no código de teste original, trocando o HiveMQ pelo envio para a Vercel.
  *
  * O que este firmware faz:
- *  1. Lê a temperatura do NTC a cada 10 s (média de várias amostras + detecção
- *     de sensor rompido/em curto).
+ *  1. Lê o DS18B20 a cada 5 s e atualiza o display OLED e os LEDs.
  *  2. A cada 60 s envia a média do período por HTTPS para a Vercel
- *     (/api/telemetria). Esse único envio alimenta:
- *       - o PAINEL (que lê o estado guardado no servidor);
- *       - os ALERTAS em segundo plano (Web Push + Telegram);
- *       - a detecção de QUEDA DE ENERGIA: se os envios param de chegar,
- *         o servidor entende que a loja ficou sem energia ou sem internet.
+ *     (/api/telemetria). Esse envio alimenta o painel, os alertas no celular
+ *     e a detecção de queda de energia (se os envios param, o servidor avisa).
+ *  3. O limite de alerta usado no display/LEDs vem do servidor (variável
+ *     LIMITE_TEMP_C na Vercel). Não precisa regravar a placa para mudar o limite.
+ *  4. A última linha do display mostra se a comunicação com o servidor está ok.
  *
- * Não usa mais MQTT/HiveMQ. Nenhuma biblioteca externa é necessária:
- * só a placa "esp32" by Espressif (core 2.x ou 3.x) na IDE Arduino.
+ * Bibliotecas (Gerenciador de Bibliotecas da IDE Arduino):
+ *  - OneWire
+ *  - DallasTemperature
+ *  - Adafruit GFX Library
+ *  - Adafruit SSD1306
+ *  - Placa: "esp32" by Espressif
+ *  (A PubSubClient não é mais usada.)
  * ========================================================================== */
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <math.h>
 
-// ============================== CONFIGURAÇÃO =================================
-// --- Identificação deste freezer (muda em cada placa) ---
-const char* LOJA    = "NEVASKA_SC";     // NEVASKA_SC | NEVASKA_BERNARDINO
-const char* FREEZER = "freezer_01";     // use só letras, números, _ e -
+// ======================= CONFIGURAÇÕES DA REDE WI-FI =========================
+// Use a rede de 2.4 GHz (o ESP32 não conecta em redes 5 GHz).
+const char* WIFI_SSID = "NOME_DA_REDE";
+const char* WIFI_PASS = "SENHA_DA_REDE";
 
-// --- Wi-Fi da loja ---
-const char* WIFI_SSID  = "NOME_DA_REDE";
-const char* WIFI_SENHA = "SENHA_DA_REDE";
+// ======================= CONFIGURAÇÕES DO SERVIDOR (VERCEL) ==================
+const char* URL_TELEMETRIA    = "https://app-nevaska-seven.vercel.app/api/telemetria";
+const char* CHAVE_DISPOSITIVO = "COLE_AQUI_O_VALOR_DA_DEVICE_KEY_DA_VERCEL";
 
-// --- Vercel ---
-const char* URL_TELEMETRIA    = "https://SEU-PROJETO.vercel.app/api/telemetria";
-const char* CHAVE_DISPOSITIVO = "MESMO_VALOR_DA_VARIAVEL_DEVICE_KEY_NA_VERCEL";
+// =======================================================================
+// AQUI VOCÊ DEFINE O FREEZER (MUDE APENAS ESTAS DUAS LINHAS PARA CADA PLACA)
+// Lojas: "NEVASKA_SC" ou "NEVASKA_BERNARDINO"
+// Freezers: "freezer_01", "freezer_02", "freezer_03", etc.
+// Use só letras, números, _ e - (sem espaço). Cada placa da mesma loja
+// precisa de um FREEZER_ID diferente.
+// =======================================================================
+const char* LOJA_ID    = "NEVASKA_SC";
+const char* FREEZER_ID = "freezer_01";
 
-// --- Sensor NTC ---
-// Ligação considerada:  3V3 ── R_SERIE ──┬── NTC ── GND
-//                                        └── PINO_NTC (ADC1)
-// Se o seu NTC estiver do lado do 3V3 (e o resistor no GND), troque a fórmula
-// marcada com [LIGAÇÃO] em lerTemperatura().
-const int   PINO_NTC     = 34;       // use pinos do ADC1 (32–39): o ADC2 não funciona com Wi-Fi ligado
-// ATENÇÃO AO RESISTOR FIXO: com NTC de 10 kΩ, a -20 °C ele vale ~100 kΩ. Se o resistor
-// fixo for de 10 kΩ, a tensão fica em ~3,0 V, colada na saturação do ADC do ESP32
-// (~3,1 V): a leitura perde precisão e um fio rompido fica parecendo "-30 °C".
-// Para a faixa de freezer use um resistor fixo de 100 kΩ (ou 47 kΩ) — a -20 °C a
-// tensão fica perto de 1,7 V, no meio da faixa. Coloque aqui o valor REAL da sua placa.
-const float R_SERIE      = 100000.0; // resistor fixo do divisor (Ω)
-const float R_NOMINAL    = 10000.0;  // resistência do NTC a 25 °C (Ω)
-const float T_NOMINAL_C  = 25.0;
-const float BETA         = 3950.0;   // coeficiente Beta do seu NTC (veja o datasheet)
-const float OFFSET_C     = 0.0;      // calibração fina (compare com um termômetro de referência)
-const int   AMOSTRAS     = 32;
+// ======================= CONFIGURAÇÕES DO HARDWARE ===========================
+const int PIN_DS18B20      = 4;
+const int PIN_LED_VERDE    = 26;
+const int PIN_LED_VERMELHO = 27;
 
-// --- Intervalos ---
-const unsigned long INTERVALO_LEITURA_MS     = 10UL * 1000;      // lê o sensor
-const unsigned long INTERVALO_ENVIO_MS       = 60UL * 1000;      // envia para a Vercel (servidor considera offline após 3 min)
-const unsigned long REINICIAR_SEM_WIFI_MS    = 10UL * 60 * 1000; // reinicia a placa se ficar 10 min sem Wi-Fi
-const int           FALHAS_HTTP_PARA_REINICIAR = 10;             // ~10 min de envios falhando seguidos
-// =============================================================================
+// Limite usado no display/LEDs ATÉ o servidor responder pela primeira vez.
+// Depois disso vale o limite que está na Vercel (LIMITE_TEMP_C).
+float limiteAlerta = 30.0;
+
+// ======================= INTERVALOS ==========================================
+const unsigned long INTERVALO_LEITURA_MS       = 5UL * 1000;       // lê o sensor e atualiza o display
+const unsigned long INTERVALO_ENVIO_MS         = 60UL * 1000;      // envia para a Vercel
+const unsigned long REINICIAR_SEM_WIFI_MS      = 10UL * 60 * 1000; // reinicia se ficar 10 min sem Wi-Fi
+const int           FALHAS_HTTP_PARA_REINICIAR = 10;               // ~10 min de envios falhando seguidos
+
+// ======================= DISPLAY OLED ========================================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool displayOk = false;
+
+// ======================= INSTÂNCIAS E VARIÁVEIS ==============================
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature sensors(&oneWire);
 
 // Acumulador das leituras entre um envio e outro (o envio manda a média).
 float somaLeituras = 0;
 int   qtdLeiturasValidas = 0;
-int   qtdLeiturasInvalidas = 0;
 
+float ultimaTemp = NAN;
 unsigned long ultimaLeituraMs = 0;
 unsigned long ultimoEnvioMs = 0;
 unsigned long wifiCaiuEmMs = 0;
 bool primeiroEnvioFeito = false;
 int  falhasHttpSeguidas = 0;
+int  ultimoCodigoHttp = 0;   // 0 = ainda não enviou; usado na última linha do display
 
 // -----------------------------------------------------------------------------
-// Leitura do NTC. Retorna NAN se o sensor estiver aberto ou em curto.
+// Sensor DS18B20. Retorna NAN se estiver desconectado ou com leitura inválida.
 // -----------------------------------------------------------------------------
 float lerTemperatura() {
-  uint32_t somaMv = 0;
-  for (int i = 0; i < AMOSTRAS; i++) {
-    somaMv += analogReadMilliVolts(PINO_NTC);  // já corrigido pela calibração de fábrica do ESP32
-    delay(2);
-  }
-  float mv = somaMv / (float)AMOSTRAS;
-  const float VCC_MV = 3300.0;
-
-  // Perto de 0 V = NTC em curto; perto da saturação do ADC (~3,1 V) = NTC desconectado.
-  // Melhor avisar "sensor com falha" do que mandar uma temperatura falsa.
-  if (mv < 50.0 || mv > 3050.0) return NAN;
-
-  // [LIGAÇÃO] NTC no lado do GND:
-  float rNtc = R_SERIE * mv / (VCC_MV - mv);
-  // [LIGAÇÃO] Se o NTC estiver no lado do 3V3, use:  float rNtc = R_SERIE * (VCC_MV - mv) / mv;
-
-  // Equação Beta: 1/T = 1/T0 + (1/B) * ln(R/R0)
-  float invT = (1.0 / (T_NOMINAL_C + 273.15)) + (1.0 / BETA) * log(rNtc / R_NOMINAL);
-  float tempC = (1.0 / invT) - 273.15 + OFFSET_C;
-
-  if (tempC < -55.0 || tempC > 60.0) return NAN;
-  return tempC;
+  sensors.requestTemperatures();
+  float t = sensors.getTempCByIndex(0);
+  // -127 = sensor desconectado. 85 = valor de "reset" do DS18B20 (falha de alimentação/fio).
+  if (t == DEVICE_DISCONNECTED_C || t == 85.0 || t < -55.0 || t > 125.0) return NAN;
+  return t;
 }
 
-void registrarLeitura() {
-  float t = lerTemperatura();
-  if (isnan(t)) {
-    qtdLeiturasInvalidas++;
-    Serial.println("[NTC] SENSOR INVALIDO");
-  } else {
+void registrarLeitura(float t) {
+  if (!isnan(t)) {
     somaLeituras += t;
     qtdLeiturasValidas++;
-    Serial.printf("[NTC] %.2f C\n", t);
   }
 }
 
-// Média do período. Se TODAS as leituras do período foram inválidas, devolve NAN
+// Média do período. Se nenhuma leitura do período foi válida, devolve NAN
 // (o servidor transforma isso em alerta de "falha no sensor").
 float mediaDoPeriodo() {
-  if (qtdLeiturasValidas == 0) {
-    if (qtdLeiturasInvalidas == 0) registrarLeitura();  // primeiro envio após ligar
-    if (qtdLeiturasValidas == 0) return NAN;
-  }
+  if (qtdLeiturasValidas == 0) return NAN;
   return somaLeituras / qtdLeiturasValidas;
 }
 
 void zerarPeriodo() {
   somaLeituras = 0;
   qtdLeiturasValidas = 0;
-  qtdLeiturasInvalidas = 0;
 }
 
 // -----------------------------------------------------------------------------
-// Wi-Fi
+// LEDs e display
+// -----------------------------------------------------------------------------
+bool emAlerta(float t) {
+  return isnan(t) || t > limiteAlerta;
+}
+
+void atualizarLeds(float t) {
+  bool alerta = emAlerta(t);
+  digitalWrite(PIN_LED_VERDE, alerta ? LOW : HIGH);
+  digitalWrite(PIN_LED_VERMELHO, alerta ? HIGH : LOW);
+}
+
+String textoConexao() {
+  if (WiFi.status() != WL_CONNECTED) return "Wi-Fi: sem conexao";
+  if (ultimoCodigoHttp == 0)         return "Nuvem: conectando...";
+  if (ultimoCodigoHttp == 200)       return "Nuvem: OK";
+  if (ultimoCodigoHttp == 401)       return "Nuvem: chave errada";
+  if (ultimoCodigoHttp < 0)          return "Nuvem: sem internet";
+  return "Nuvem: erro " + String(ultimoCodigoHttp);
+}
+
+void atualizarDisplay(float t) {
+  if (!displayOk) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // Linhas 1 e 2: identificação
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(LOJA_ID);
+  display.println(FREEZER_ID);
+
+  // Temperatura em destaque
+  display.setTextSize(2);
+  display.setCursor(0, 20);
+  if (isnan(t)) {
+    display.print("-- C");
+  } else {
+    display.print(t, 1);
+    display.print(" C");
+  }
+
+  // Situação da temperatura
+  display.setTextSize(1);
+  display.setCursor(0, 42);
+  if (isnan(t))               display.print("ERRO NO SENSOR!");
+  else if (t > limiteAlerta)  display.print("ALERTA: TEMP. ALTA!");
+  else                        display.print("TEMPERATURA NORMAL");
+
+  // Comunicação com o servidor
+  display.setCursor(0, 54);
+  display.print(textoConexao());
+
+  display.display();
+}
+
+void mostrarMensagem(const char* linha1, const char* linha2) {
+  if (!displayOk) return;
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(LOJA_ID);
+  display.println(FREEZER_ID);
+  display.println("");
+  display.println(linha1);
+  display.println(linha2);
+  display.display();
+}
+
+// -----------------------------------------------------------------------------
+// Wi-Fi (não trava a placa se a rede cair: o display continua funcionando)
 // -----------------------------------------------------------------------------
 void conectarWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_SENHA);
-  Serial.print("[WiFi] conectando");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("Conectando ao Wi-Fi: ");
+  Serial.println(WIFI_SSID);
+  mostrarMensagem("Conectando Wi-Fi...", WIFI_SSID);
+
   unsigned long inicio = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - inicio < 20000) {
     delay(500);
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf(" ok, IP %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("\nWi-Fi conectado! IP %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println(" falhou (o loop continua tentando)");
+    Serial.println("\nWi-Fi nao conectou ainda (o loop continua tentando).");
   }
 }
 
@@ -156,7 +224,6 @@ void vigiarWifi() {
     Serial.println("[WiFi] caiu, tentando reconectar...");
     WiFi.reconnect();
   }
-  // Rede travada às vezes só volta reiniciando a placa.
   if (millis() - wifiCaiuEmMs > REINICIAR_SEM_WIFI_MS) {
     Serial.println("[WiFi] muito tempo sem rede, reiniciando ESP32");
     ESP.restart();
@@ -164,53 +231,73 @@ void vigiarWifi() {
 }
 
 // -----------------------------------------------------------------------------
-// HTTPS → Vercel. Retorna true se o servidor aceitou.
+// HTTPS → Vercel. Retorna o código HTTP (negativo = erro de conexão).
 // -----------------------------------------------------------------------------
-bool enviarTelemetria(float temp) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
+int enviarTelemetria(float temp) {
   WiFiClientSecure tls;
-  // setInsecure() criptografa mas não valida o certificado. Para produção mais
-  // rígida, use tls.setCACert(...) com o certificado raiz do domínio da Vercel.
+  // setInsecure() criptografa mas não valida o certificado (mesmo esquema do código original).
   tls.setInsecure();
 
   HTTPClient http;
   http.setTimeout(10000);
   http.setConnectTimeout(8000);
   if (!http.begin(tls, URL_TELEMETRIA)) {
-    Serial.println("[HTTP] begin falhou");
-    return false;
+    Serial.println("[HTTP] begin falhou (confira a URL)");
+    return -1;
   }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("x-chave-dispositivo", CHAVE_DISPOSITIVO);
 
   char corpo[160];
   if (isnan(temp)) {
-    snprintf(corpo, sizeof(corpo), "{\"loja\":\"%s\",\"freezer\":\"%s\",\"temp\":null}", LOJA, FREEZER);
+    snprintf(corpo, sizeof(corpo), "{\"loja\":\"%s\",\"freezer\":\"%s\",\"temp\":null}", LOJA_ID, FREEZER_ID);
   } else {
-    snprintf(corpo, sizeof(corpo), "{\"loja\":\"%s\",\"freezer\":\"%s\",\"temp\":%.2f}", LOJA, FREEZER, temp);
+    snprintf(corpo, sizeof(corpo), "{\"loja\":\"%s\",\"freezer\":\"%s\",\"temp\":%.2f}", LOJA_ID, FREEZER_ID, temp);
   }
 
   int codigo = http.POST((uint8_t*)corpo, strlen(corpo));
   if (codigo > 0) {
-    Serial.printf("[HTTP] %d %s\n", codigo, http.getString().c_str());
+    String resposta = http.getString();
+    Serial.printf("[HTTP] %d %s\n", codigo, resposta.c_str());
+
+    // Pega o limite de alerta que o servidor devolve: ..."limite":-12,...
+    int pos = resposta.indexOf("\"limite\":");
+    if (codigo == 200 && pos >= 0) {
+      String resto = resposta.substring(pos + 9);
+      char c = resto.length() ? resto.charAt(0) : ' ';
+      if (c == '-' || (c >= '0' && c <= '9')) {
+        float novoLimite = resto.toFloat();
+        if (novoLimite != limiteAlerta) {
+          Serial.printf("[HTTP] limite de alerta atualizado: %.1f C\n", novoLimite);
+          limiteAlerta = novoLimite;
+        }
+      }
+    }
   } else {
     Serial.printf("[HTTP] erro: %s\n", http.errorToString(codigo).c_str());
   }
   http.end();
-
-  // 401 = DEVICE_KEY errada; 400 = LOJA/FREEZER com caractere inválido.
-  return codigo >= 200 && codigo < 300;
+  return codigo;
 }
 
 // =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.printf("\n=== Nevaska %s / %s ===\n", LOJA, FREEZER);
+  Serial.printf("\n=== Nevaska %s / %s ===\n", LOJA_ID, FREEZER_ID);
 
-  analogReadResolution(12);
-  // A atenuação padrão do ESP32 já é 11 dB (faixa de 0 a ~3,1 V), ideal para o divisor do NTC.
+  pinMode(PIN_LED_VERDE, OUTPUT);
+  pinMode(PIN_LED_VERMELHO, OUTPUT);
+
+  sensors.begin();
+
+  // Se o display falhar, a placa CONTINUA monitorando (antes ela travava aqui).
+  displayOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!displayOk) {
+    Serial.println("Erro ao iniciar o display OLED (seguindo sem display)");
+  }
+  mostrarMensagem("Iniciando...", "");
+  delay(1500);
 
   conectarWifi();
 }
@@ -220,21 +307,34 @@ void loop() {
 
   unsigned long agora = millis();
 
-  if (agora - ultimaLeituraMs >= INTERVALO_LEITURA_MS) {
+  // ---------- Leitura do sensor + display + LEDs (a cada 5 s) ----------
+  if (agora - ultimaLeituraMs >= INTERVALO_LEITURA_MS || ultimaLeituraMs == 0) {
     ultimaLeituraMs = agora;
-    registrarLeitura();
+    ultimaTemp = lerTemperatura();
+    registrarLeitura(ultimaTemp);
+
+    Serial.print("[");
+    Serial.print(LOJA_ID);
+    Serial.print(" - ");
+    Serial.print(FREEZER_ID);
+    Serial.print("] Temperatura: ");
+    if (isnan(ultimaTemp)) Serial.println("ERRO NO SENSOR");
+    else { Serial.print(ultimaTemp, 2); Serial.println(" C"); }
+
+    atualizarLeds(ultimaTemp);
+    atualizarDisplay(ultimaTemp);
   }
 
-  // Primeiro envio logo após ligar (avisa o servidor que a energia voltou),
-  // depois a cada 60 s.
+  // ---------- Envio para a Vercel (logo ao ligar e depois a cada 60 s) ----------
   if ((!primeiroEnvioFeito || agora - ultimoEnvioMs >= INTERVALO_ENVIO_MS) && WiFi.status() == WL_CONNECTED) {
     ultimoEnvioMs = agora;
     primeiroEnvioFeito = true;
 
-    bool ok = enviarTelemetria(mediaDoPeriodo());
+    ultimoCodigoHttp = enviarTelemetria(mediaDoPeriodo());
     zerarPeriodo();
+    atualizarDisplay(ultimaTemp);
 
-    if (ok) {
+    if (ultimoCodigoHttp >= 200 && ultimoCodigoHttp < 300) {
       falhasHttpSeguidas = 0;
     } else if (++falhasHttpSeguidas >= FALHAS_HTTP_PARA_REINICIAR) {
       // Wi-Fi "conectado" mas sem internet de verdade costuma voltar com um reinício.

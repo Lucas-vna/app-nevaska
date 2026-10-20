@@ -97,6 +97,7 @@ test('fluxo completo: inscrição, alerta de temperatura, normalização', async
   r = await chamar(telemetria, { headers: h, body: { loja: 'NEVASKA_SC', freezer: 'freezer_01', temp: -19 } });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.eventos, []);
+  assert.equal(r.body.limite, -12); // ESP32 usa este valor no display/LEDs
 
   r = await chamar(telemetria, { headers: h, body: { loja: 'NEVASKA_SC', freezer: 'freezer_01', temp: -4 } });
   assert.deepEqual(r.body.eventos, ['temp_alta']);

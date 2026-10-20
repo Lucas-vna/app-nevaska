@@ -9,7 +9,7 @@ O projeto **não usa mais MQTT nem HiveMQ** (o HiveMQ Cloud Serverless será des
 ## Como funciona
 
 ```
- ESP32 + NTC ── HTTPS a cada 60 s ──►  Vercel /api/telemetria
+ ESP32 + DS18B20 ─ HTTPS a cada 60 s ─►  Vercel /api/telemetria
                                           │  guarda a leitura no Supabase (Postgres)
                                           │  regras: tolerância, histerese, repetição
                                           ▼
@@ -22,7 +22,7 @@ O projeto **não usa mais MQTT nem HiveMQ** (o HiveMQ Cloud Serverless será des
                                                    └──► Pushover (opcional, alarme crítico)
 ```
 
-- O **ESP32** lê o sensor a cada 10 s e envia a média para a Vercel a cada 60 s.
+- O **ESP32** lê o sensor DS18B20 a cada 5 s (atualizando o display OLED e os LEDs) e envia a média para a Vercel a cada 60 s. O limite usado no display e nos LEDs vem do servidor, então ele é configurado num lugar só.
 - O **servidor** guarda a última leitura, avalia as regras e dispara os alertas.
 - O **painel** consulta o servidor a cada 20 s (só enquanto está aberto na tela). Não tem senha de broker no navegador.
 - **Queda de energia** é percebida pela ausência de envios: se um freezer fica 3 minutos sem mandar nada, sai o alerta "SEM SINAL". Isso cobre queda de luz, internet da loja fora e ESP32 travado.
@@ -129,10 +129,10 @@ Para quem precisa ser **acordado** (dono, gerente de plantão), o Pushover tem p
 O firmware antigo só publicava no MQTT. Sem o firmware novo, **o painel fica vazio e os alertas não funcionam**.
 
 1. Faça uma **cópia** de `firmware/nevaska_freezer/` fora da pasta do repositório (é nela que você vai colocar as senhas reais).
-2. Preencha o bloco de configuração: `LOJA`, `FREEZER`, Wi-Fi, `URL_TELEMETRIA` e `CHAVE_DISPOSITIVO` (= `DEVICE_KEY` da Vercel).
-3. Confira o comentário sobre o **resistor fixo do NTC**: para a faixa de freezer ele deve ser de ~100 kΩ (ou 47 kΩ), e o valor em `R_SERIE` tem de bater com o que está soldado na placa.
-4. Grave em cada placa pela IDE Arduino (placa "esp32" by Espressif). Não precisa de nenhuma biblioteca extra.
-5. Abra o Monitor Serial (115200): deve aparecer `[HTTP] 200 {"ok":true...}` a cada minuto. `401` = `CHAVE_DISPOSITIVO` errada; `400` = nome de loja/freezer com caractere inválido.
+2. Preencha o bloco de configuração: Wi-Fi (rede **2.4 GHz**), `URL_TELEMETRIA`, `CHAVE_DISPOSITIVO` (= `DEVICE_KEY` da Vercel), `LOJA_ID` e `FREEZER_ID` (um diferente para cada placa).
+3. Hardware considerado: sensor **DS18B20** no pino 4, LED verde no 26, LED vermelho no 27 e display **OLED SSD1306** (I2C, endereço 0x3C). Se a montagem for diferente, ajuste os pinos no bloco de hardware.
+4. Bibliotecas: **OneWire**, **DallasTemperature**, **Adafruit GFX Library** e **Adafruit SSD1306** (a PubSubClient não é mais usada). Placa: "esp32" by Espressif.
+5. Abra o Monitor Serial (115200): deve aparecer `[HTTP] 200 {"ok":true,"limite":...}` a cada minuto. A última linha do display também mostra a situação: `Nuvem: OK`, `Nuvem: chave errada` (401), `Wi-Fi: sem conexao` etc. `400` = nome de loja/freezer com caractere inválido.
 
 ### 9. Desligar o HiveMQ
 
@@ -187,7 +187,7 @@ Depois de mudar qualquer variável, faça um **Redeploy** para valer. Para abrir
 
 3. **Queda de energia:** com um ESP32 real rodando, desligue-o da tomada. Em até ~3–4 minutos chega "SEM SINAL" e o card fica cinza com "OFFLINE" no painel. Religue: chega "Sinal restabelecido".
 
-4. **Sensor:** desconecte o NTC com o ESP32 ligado. No envio seguinte chega "FALHA NO SENSOR" e o card mostra "ERRO".
+4. **Sensor:** desconecte o DS18B20 com o ESP32 ligado. No envio seguinte chega "FALHA NO SENSOR" e o card mostra "ERRO".
 
 5. Os testes automáticos da lógica rodam com `npm test`.
 
