@@ -302,7 +302,7 @@
         Notification.requestPermission().then(permission => {
           if (permission === "granted") {
             document.getElementById('notif-btn').style.display = 'none';
-            sendPushNotification("Nevaska IoT", "Notificações ativadas com sucesso!");
+            sendPushNotification("Nevaska IoT", "Notificações ativadas com sucesso! Teste de alerta.");
           } else {
             alert("As notificações foram bloqueadas nas configurações do navegador.");
           }
@@ -320,7 +320,6 @@
           requireInteraction: true
         };
 
-        // Disparo prioritário via Service Worker (compatível com PWA e iOS na Tela de Início)
         if (swRegistration && swRegistration.showNotification) {
           swRegistration.showNotification(titulo, options);
         } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
