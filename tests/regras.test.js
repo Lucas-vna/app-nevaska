@@ -7,7 +7,7 @@ const MIN = 60_000;
 const cfg = { toleranciaMin: 5, repetirMin: 30, histerese: 2, offlineMin: 3, sensorMin: -55, sensorMax: 60 };
 const LIMITE = -12;
 
-// Simula uma sequência de leituras, aplicando o "novo" ao estado como o Redis faria.
+// Simula uma sequência de leituras, aplicando o "novo" ao estado como o banco faria.
 function simular(leituras, estadoInicial = {}) {
   let estado = { ...estadoInicial };
   const todos = [];
@@ -97,7 +97,7 @@ test('freezer que nunca enviou não gera offline', () => {
   assert.equal(eventos.length, 0);
 });
 
-test('estado vindo do Redis como string funciona', () => {
+test('estado vindo do banco como string funciona', () => {
   const estado = { lastSeen: String(10 * MIN), tempAlerta: '1', acimaDesde: String(5 * MIN), ultimoAvisoTemp: String(10 * MIN), temp: '-5' };
   const { eventos } = avaliarLeitura(estado, -20, 11 * MIN, cfg, LIMITE);
   assert.equal(eventos[0].tipo, 'temp_normal');

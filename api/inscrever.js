@@ -4,7 +4,7 @@
 //                              e manda uma notificação de confirmação SÓ pra ele
 //   DELETE { endpoint }      → remove o celular
 // =============================================================================
-import { redis, CHAVES } from '../lib/redis.js';
+import { salvarInscricao, removerInscricao } from '../lib/db.js';
 import { enviarWebPush } from '../lib/notificar.js';
 
 function inscricaoValida(s) {
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
       if (!inscricaoValida(insc)) return res.status(400).json({ erro: 'Inscrição inválida' });
 
       const limpa = { endpoint: insc.endpoint, expirationTime: insc.expirationTime ?? null, keys: { p256dh: insc.keys.p256dh, auth: insc.keys.auth } };
-      await redis().hset(CHAVES.inscricoes, { [limpa.endpoint]: JSON.stringify(limpa) });
+      await salvarInscricao(limpa);
 
       // Confirmação ponta a ponta: se essa notificação chegar, o caminho todo funciona.
       if (corpo?.confirmar) {
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
     if (req.method === 'DELETE') {
       const endpoint = corpo?.endpoint;
       if (!endpoint) return res.status(400).json({ erro: 'endpoint obrigatório' });
-      await redis().hdel(CHAVES.inscricoes, endpoint);
+      await removerInscricao(endpoint);
       return res.status(200).json({ ok: true });
     }
 

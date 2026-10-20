@@ -15,7 +15,6 @@
   <meta name="apple-mobile-web-app-title" content="Nevaska">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
   <style>
     :root { --azul-nevaska: #00A3E0; --amarelo-nevaska: #FFD100; --vermelho-alerta: #E30613; --verde-ok: #28a745; --cinza-off: #8a94a0; --fundo-gelo: #EBF6FC; --texto-escuro: #1A2B3C; }
@@ -31,8 +30,10 @@
     .notif-banner.erro { background-color: #FCE8E6; color: var(--vermelho-alerta); }
     .notif-banner small { display: block; font-weight: normal; font-size: 0.85rem; }
     .store-tabs { display: flex; justify-content: center; gap: 10px; margin: 20px auto; max-width: 500px; padding: 0 15px; }
-    .tab-btn { flex: 1; padding: 12px 15px; border: 2px solid var(--azul-nevaska); background-color: white; color: var(--azul-nevaska); font-weight: bold; border-radius: 12px; cursor: pointer; }
+    .tab-btn { flex: 1; padding: 12px 15px; border: 2px solid var(--azul-nevaska); background-color: white; color: var(--azul-nevaska); font-weight: bold; border-radius: 12px; cursor: pointer; position: relative; }
     .tab-btn.active { background-color: var(--azul-nevaska); color: white; }
+    .tab-btn .ponto-alerta { display: none; position: absolute; top: -5px; right: -5px; width: 14px; height: 14px; border-radius: 50%; background: var(--vermelho-alerta); border: 2px solid white; }
+    .tab-btn.tem-alerta .ponto-alerta { display: block; }
     .container { max-width: 600px; margin: 0 auto; padding: 0 15px; }
     .store-section { display: none; }
     .store-section.active { display: block; }
@@ -61,7 +62,7 @@
     <h1>NEVASKA</h1>
     <p>Monitoramento de Freezers</p>
     <div class="header-pills">
-      <span id="connection-status" class="pill">Conectando ao HiveMQ...</span>
+      <span id="connection-status" class="pill">Carregando...</span>
       <span id="pill-alertas" class="pill"><i class="fa-solid fa-bell"></i> Alertas ativos</span>
     </div>
   </header>
@@ -69,37 +70,32 @@
   <!-- Banner muda de texto conforme a situação do celular (ver iniciarNotificacoes) -->
   <div id="notif-btn" class="notif-banner"></div>
 
-  <div class="store-tabs">
-    <button class="tab-btn active" onclick="switchStore('NEVASKA_SC', event)"><i class="fa-solid fa-store"></i> Santa Cruz</button>
-    <button class="tab-btn" onclick="switchStore('NEVASKA_BERNARDINO', event)"><i class="fa-solid fa-store"></i> Bernardino</button>
-  </div>
-  <div class="container">
-    <div id="NEVASKA_SC" class="store-section active"><div id="cards-NEVASKA_SC"><p class="vazio">Aguardando dados dos freezers...</p></div></div>
-    <div id="NEVASKA_BERNARDINO" class="store-section"><div id="cards-NEVASKA_BERNARDINO"><p class="vazio">Aguardando dados dos freezers...</p></div></div>
-  </div>
+  <!-- Abas e seções são montadas a partir das lojas configuradas na Vercel -->
+  <div class="store-tabs" id="abas"></div>
+  <div class="container" id="secoes"></div>
 
   <script>
     // =========================================================================
     // ARQUITETURA (resumo)
-    // - Este painel serve só para VISUALIZAR em tempo real (MQTT via WebSocket).
-    // - Os ALERTAS não dependem mais do painel aberto: quem decide e dispara é o
-    //   servidor (/api/telemetria + /api/watchdog), via Web Push + Telegram.
-    // - Por isso o painel não gera notificação local de alerta (evita duplicar).
+    // - O ESP32 envia a temperatura para a Vercel (/api/telemetria) por HTTPS.
+    // - Este painel só LÊ o estado guardado no servidor (/api/estado).
+    //   Não há mais MQTT nem senha de broker no navegador.
+    // - Os ALERTAS não dependem do painel aberto: quem dispara é o servidor,
+    //   via Web Push + Telegram, com o celular bloqueado.
     // =========================================================================
 
-    // ---------- Configuração do MQTT (somente leitura) -----------------------
-    // ATENÇÃO: tudo que está neste arquivo é público. Crie no HiveMQ Cloud uma
-    // credencial SÓ com permissão de SUBSCRIBE em "sorveteria/#" para o painel.
-    // Nunca use aqui a mesma credencial que o ESP32 usa para publicar.
-    const MQTT_HOST = "wss://ecc7980f7b0c433fbf4b63748514aa36.s1.eu.hivemq.cloud:8884/mqtt";
-    const MQTT_USER = "painel_leitura";
-    const MQTT_PASS = "SENHA_DA_CREDENCIAL_SOMENTE_LEITURA";
+    const INTERVALO_ATUALIZACAO_MS = 20000; // o ESP32 envia a cada 60 s
 
-    // Valores padrão; são substituídos pelos do servidor em /api/config.
-    let CFG = { vapidPublicKey: null, limiteTemp: -12, limitesPorFreezer: {}, offlineMin: 3 };
-
-    const estadoFreezers = {}; // cardId -> { ultimaMsg, statusMqtt, temp }
+    // Valores padrão; substituídos pelos do servidor em /api/config.
+    let CFG = { vapidPublicKey: null, offlineMin: 3, nomesLojas: { NEVASKA_SC: 'Santa Cruz', NEVASKA_BERNARDINO: 'Bernardino' }, painelProtegido: false };
     let swRegistration = null;
+
+    async function carregarConfig() {
+      try {
+        const r = await fetch('/api/config', { cache: 'no-store' });
+        if (r.ok) CFG = { ...CFG, ...(await r.json()) };
+      } catch (e) { console.warn('Sem /api/config, usando padrões', e); }
+    }
 
     // =========================================================================
     // 1) NOTIFICAÇÕES PUSH (Web Push com VAPID)
@@ -121,13 +117,6 @@
     }
     function marcarAlertasAtivos(ativo) {
       document.getElementById('pill-alertas').style.display = ativo ? 'inline-block' : 'none';
-    }
-
-    async function carregarConfig() {
-      try {
-        const r = await fetch('/api/config', { cache: 'no-store' });
-        if (r.ok) CFG = { ...CFG, ...(await r.json()) };
-      } catch (e) { console.warn('Sem /api/config, usando padrões', e); }
     }
 
     function base64UrlParaUint8(base64Url) {
@@ -209,13 +198,32 @@
     }
 
     // =========================================================================
-    // 2) PAINEL EM TEMPO REAL (MQTT)
+    // 2) SENHA OPCIONAL DO PAINEL (só se PAINEL_CHAVE estiver configurada)
     // =========================================================================
-    function switchStore(storeId, evt) {
-      document.querySelectorAll('.store-section').forEach(el => el.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-      document.getElementById(storeId).classList.add('active');
-      if (evt) evt.currentTarget.classList.add('active');
+    function lerChavePainel() {
+      try { return localStorage.getItem('nevaska_chave_painel') || ''; } catch { return ''; }
+    }
+    function salvarChavePainel(valor) {
+      try { valor ? localStorage.setItem('nevaska_chave_painel', valor) : localStorage.removeItem('nevaska_chave_painel'); } catch {}
+    }
+    function pedirChavePainel(msg) {
+      const valor = window.prompt(msg || 'Digite a senha do painel Nevaska:');
+      if (valor) salvarChavePainel(valor.trim());
+      return !!valor;
+    }
+
+    // =========================================================================
+    // 3) PAINEL — lê /api/estado periodicamente
+    // =========================================================================
+    let lojaAtiva = null;
+    try { lojaAtiva = localStorage.getItem('nevaska_loja_ativa'); } catch {}
+    let ultimoDado = null;      // última resposta do servidor
+    let recebidoEm = 0;         // Date.now() de quando a resposta chegou
+    let buscando = false;
+    let timer = null;
+
+    function nomeDaLoja(loja) {
+      return CFG.nomesLojas?.[loja] || loja.replace(/^NEVASKA_/, '').replace(/_/g, ' ');
     }
 
     function definirStatusConexao(texto, ruim) {
@@ -224,130 +232,170 @@
       el.classList.toggle('ruim', !!ruim);
     }
 
-    const client = mqtt.connect(MQTT_HOST, {
-      username: MQTT_USER,
-      password: MQTT_PASS,
-      clientId: 'web_' + Math.random().toString(16).slice(2, 10),
-      reconnectPeriod: 3000,
-      connectTimeout: 10000,
-      clean: true
-    });
-    client.on('connect', () => { definirStatusConexao('● Sistema Online'); client.subscribe('sorveteria/#'); });
-    client.on('reconnect', () => definirStatusConexao('Reconectando...', true));
-    client.on('offline', () => definirStatusConexao('● Sem conexão com o servidor', true));
-    client.on('error', (e) => { console.error('MQTT', e); definirStatusConexao('● Erro de conexão', true); });
-
-    // Ao voltar para o app (desbloqueou a tela), reconecta na hora em vez de esperar.
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && !client.connected) client.reconnect();
-    });
-
-    client.on('message', (topic, message) => {
-      const parts = topic.split('/');
-      if (parts.length < 4) return;
-      updateFreezerCard(parts[1], parts[2], parts[3], message.toString());
-    });
-
-    function limiteDe(loja, freezer) {
-      const especifico = CFG.limitesPorFreezer?.[`${loja}/${freezer}`];
-      return (especifico !== undefined && especifico !== null && especifico !== '') ? Number(especifico) : Number(CFG.limiteTemp);
+    function switchStore(loja) {
+      lojaAtiva = loja;
+      try { localStorage.setItem('nevaska_loja_ativa', loja); } catch {}
+      document.querySelectorAll('.store-section').forEach(el => el.classList.toggle('active', el.dataset.loja === loja));
+      document.querySelectorAll('.tab-btn').forEach(el => el.classList.toggle('active', el.dataset.loja === loja));
     }
 
-    // Cria o card com createElement/textContent (nada de innerHTML com dados do broker).
-    function criarCard(loja, freezer, cardId, container) {
-      container.querySelector('.vazio')?.remove();
+    // Garante que existe aba + seção para cada loja (configuradas + as que aparecerem nos dados).
+    function garantirLojas(lojas) {
+      const abas = document.getElementById('abas');
+      const secoes = document.getElementById('secoes');
+      for (const loja of lojas) {
+        if (document.querySelector(`.tab-btn[data-loja="${CSS.escape(loja)}"]`)) continue;
+
+        const btn = document.createElement('button');
+        btn.className = 'tab-btn';
+        btn.dataset.loja = loja;
+        const icone = document.createElement('i'); icone.className = 'fa-solid fa-store';
+        const ponto = document.createElement('span'); ponto.className = 'ponto-alerta';
+        btn.append(icone, ' ' + nomeDaLoja(loja), ponto);
+        btn.onclick = () => switchStore(loja);
+        abas.appendChild(btn);
+
+        const secao = document.createElement('div');
+        secao.className = 'store-section';
+        secao.dataset.loja = loja;
+        const vazio = document.createElement('p'); vazio.className = 'vazio'; vazio.textContent = 'Nenhum freezer enviou dados ainda.';
+        secao.appendChild(vazio);
+        secoes.appendChild(secao);
+      }
+      if (!lojaAtiva || !lojas.includes(lojaAtiva)) lojaAtiva = lojas[0];
+      if (lojaAtiva) switchStore(lojaAtiva);
+    }
+
+    // Cria o card com createElement/textContent (nada de innerHTML com dados externos).
+    function criarCard(f, secao) {
+      secao.querySelector('.vazio')?.remove();
       const card = document.createElement('div');
-      card.id = cardId;
       card.className = 'freezer-card ok';
-
-      const header = document.createElement('div'); header.className = 'card-header';
-      const titulo = document.createElement('span'); titulo.className = 'card-title'; titulo.textContent = freezer.replace(/_/g, ' ').toUpperCase();
-      const badge = document.createElement('span'); badge.className = 'status-badge online'; badge.id = `status-${cardId}`; badge.textContent = 'ONLINE';
-      header.append(titulo, badge);
-
-      const body = document.createElement('div'); body.className = 'card-body';
-      const col = document.createElement('div');
-      const temp = document.createElement('div'); temp.className = 'temp-display ok'; temp.id = `temp-${cardId}`; temp.textContent = '-- °C';
-      const lim = document.createElement('div'); lim.className = 'temp-limite'; lim.textContent = `Alerta acima de ${limiteDe(loja, freezer).toFixed(1)} °C`;
-      col.append(temp, lim);
-      const icone = document.createElement('i'); icone.className = 'fa-solid fa-snowflake temp-icon';
-      body.append(col, icone);
-
-      const footer = document.createElement('div'); footer.className = 'card-footer'; footer.id = `time-${cardId}`; footer.textContent = 'Aguardando leitura';
-      card.append(header, body, footer);
-      container.appendChild(card);
+      card.dataset.id = f.id;
+      card.innerHTML = `
+        <div class="card-header"><span class="card-title"></span><span class="status-badge online"></span></div>
+        <div class="card-body"><div><div class="temp-display ok">-- °C</div><div class="temp-limite"></div></div><i class="fa-solid fa-snowflake temp-icon"></i></div>
+        <div class="card-footer"></div>`;
+      card.querySelector('.card-title').textContent = f.freezer.replace(/_/g, ' ').toUpperCase();
+      secao.appendChild(card);
       return card;
     }
 
-    function updateFreezerCard(loja, freezer, tipo, valor) {
-      const container = document.getElementById(`cards-${loja}`);
-      if (!container) return;
-      const cardId = `card-${loja}-${freezer}`;
-      const card = document.getElementById(cardId) || criarCard(loja, freezer, cardId, container);
-      const est = estadoFreezers[cardId] ||= { ultimaMsg: 0, statusMqtt: 'online', temp: null, loja, freezer };
-
-      if (tipo === 'status') {
-        est.statusMqtt = valor.trim().toLowerCase() === 'offline' ? 'offline' : 'online';
-        if (est.statusMqtt === 'online') est.ultimaMsg = Date.now();
-      }
-
-      if (tipo === 'temperatura') {
-        const t = parseFloat(valor);
-        est.temp = Number.isFinite(t) ? t : NaN;
-        est.ultimaMsg = Date.now();
-        est.statusMqtt = 'online';
-        document.getElementById(`time-${cardId}`).textContent =
-          'Atualizado às ' + new Date().toLocaleTimeString('pt-BR');
-      }
-      renderizarCard(cardId);
+    function textoTempo(segundos) {
+      if (segundos === null || segundos === undefined) return 'sem leituras';
+      if (segundos < 60) return `há ${segundos} s`;
+      const min = Math.floor(segundos / 60);
+      if (min < 60) return `há ${min} min`;
+      const h = Math.floor(min / 60);
+      return `há ${h}h${String(min % 60).padStart(2, '0')}`;
     }
 
-    function renderizarCard(cardId) {
-      const est = estadoFreezers[cardId];
-      const card = document.getElementById(cardId);
-      if (!est || !card) return;
-      const tempEl = document.getElementById(`temp-${cardId}`);
-      const badge = document.getElementById(`status-${cardId}`);
-      card.querySelector('.temp-limite').textContent = `Alerta acima de ${limiteDe(est.loja, est.freezer).toFixed(1)} °C`;
+    function renderizar() {
+      if (!ultimoDado) return;
+      const decorrido = Math.round((Date.now() - recebidoEm) / 1000);
+      const lojasComAlerta = new Set();
 
-      const semDados = est.ultimaMsg && (Date.now() - est.ultimaMsg > CFG.offlineMin * 60000);
-      const offline = est.statusMqtt === 'offline' || semDados;
+      for (const f of ultimoDado.freezers) {
+        const secao = document.querySelector(`.store-section[data-loja="${CSS.escape(f.loja)}"]`);
+        if (!secao) continue;
+        const card = secao.querySelector(`.freezer-card[data-id="${CSS.escape(f.id)}"]`) || criarCard(f, secao);
+        const tempEl = card.querySelector('.temp-display');
+        const badge = card.querySelector('.status-badge');
+        const segundos = f.segundosSemDados === null ? null : f.segundosSemDados + decorrido;
+        const offline = f.offline || (segundos !== null && segundos > ultimoDado.offlineMin * 60);
 
-      if (offline) {
-        card.className = 'freezer-card off';
-        tempEl.className = 'temp-display off';
-        badge.className = 'status-badge offline';
-        badge.textContent = est.statusMqtt === 'offline' ? 'OFFLINE' : 'SEM DADOS';
-        return;
+        card.querySelector('.temp-limite').textContent = `Alerta acima de ${Number(f.limite).toFixed(1)} °C`;
+        card.querySelector('.card-footer').textContent = offline
+          ? `Sem sinal ${textoTempo(segundos)}`
+          : `Última leitura ${textoTempo(segundos)}`;
+        tempEl.textContent = f.temp === null ? '-- °C' : `${Number(f.temp).toFixed(1)} °C`;
+
+        if (offline) {
+          card.className = 'freezer-card off';
+          tempEl.className = 'temp-display off';
+          badge.className = 'status-badge offline';
+          badge.textContent = 'OFFLINE';
+          lojasComAlerta.add(f.loja);
+        } else if (f.sensorFalha) {
+          card.className = 'freezer-card alert';
+          tempEl.className = 'temp-display alert';
+          tempEl.textContent = 'ERRO';
+          badge.className = 'status-badge offline';
+          badge.textContent = 'SENSOR';
+          lojasComAlerta.add(f.loja);
+        } else if (f.temp !== null && f.temp > f.limite) {
+          card.className = 'freezer-card alert';
+          tempEl.className = 'temp-display alert';
+          badge.className = 'status-badge offline';
+          badge.textContent = f.tempAlerta ? 'ALERTA' : 'ACIMA';
+          lojasComAlerta.add(f.loja);
+        } else {
+          card.className = 'freezer-card ok';
+          tempEl.className = 'temp-display ok';
+          badge.className = 'status-badge online';
+          badge.textContent = 'ONLINE';
+        }
       }
 
-      badge.className = 'status-badge online';
-      badge.textContent = 'ONLINE';
-
-      if (est.temp === null) return;
-      if (Number.isNaN(est.temp)) {
-        tempEl.textContent = 'ERRO';
-        card.className = 'freezer-card alert';
-        tempEl.className = 'temp-display alert';
-        badge.textContent = 'SENSOR';
-        badge.className = 'status-badge offline';
-        return;
-      }
-
-      tempEl.textContent = `${est.temp.toFixed(1)} °C`;
-      const emAlerta = est.temp > limiteDe(est.loja, est.freezer);
-      card.className = emAlerta ? 'freezer-card alert' : 'freezer-card ok';
-      tempEl.className = emAlerta ? 'temp-display alert' : 'temp-display ok';
+      // Bolinha vermelha na aba da loja que tem problema (útil quando você está olhando a outra).
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('tem-alerta', lojasComAlerta.has(btn.dataset.loja)));
     }
 
-    // Reavalia os cards a cada 15 s (para marcar "SEM DADOS" se o freezer sumir).
-    setInterval(() => Object.keys(estadoFreezers).forEach(renderizarCard), 15000);
+    async function atualizar() {
+      if (buscando) return;
+      buscando = true;
+      try {
+        const headers = {};
+        const chave = lerChavePainel();
+        if (chave) headers['x-chave-painel'] = chave;
+
+        const r = await fetch('/api/estado', { headers, cache: 'no-store' });
+        if (r.status === 401) {
+          salvarChavePainel('');
+          definirStatusConexao('● Senha do painel necessária', true);
+          if (pedirChavePainel(chave ? 'Senha incorreta. Digite a senha do painel:' : undefined)) {
+            buscando = false;
+            return atualizar();
+          }
+          return;
+        }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+
+        ultimoDado = await r.json();
+        recebidoEm = Date.now();
+        const lojas = [...new Set([...Object.keys(CFG.nomesLojas || {}), ...ultimoDado.freezers.map(f => f.loja)])];
+        garantirLojas(lojas);
+        renderizar();
+        definirStatusConexao('● Sistema Online · ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } catch (e) {
+        console.error(e);
+        definirStatusConexao('● Sem conexão com o servidor', true);
+      } finally {
+        buscando = false;
+      }
+    }
+
+    function iniciarAtualizacao() {
+      clearInterval(timer);
+      atualizar();
+      timer = setInterval(atualizar, INTERVALO_ATUALIZACAO_MS);
+    }
+
+    // Só consulta o servidor com o painel visível; ao voltar para o app, atualiza na hora.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') iniciarAtualizacao();
+      else clearInterval(timer);
+    });
+
+    // Atualiza o "há X s" dos cards entre uma consulta e outra.
+    setInterval(renderizar, 5000);
 
     // =========================================================================
     // Início
     // =========================================================================
     carregarConfig().then(() => {
-      Object.keys(estadoFreezers).forEach(renderizarCard);
+      garantirLojas(Object.keys(CFG.nomesLojas || {}));
+      iniciarAtualizacao();
       iniciarNotificacoes();
     });
   </script>

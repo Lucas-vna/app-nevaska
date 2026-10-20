@@ -2,52 +2,36 @@
  * Nevaska — Firmware do ESP32 (sensor NTC de freezer)
  *
  * O que este firmware faz:
- *  1. Lê a temperatura do NTC (média de várias amostras + detecção de sensor
- *     rompido/em curto).
- *  2. A cada 10 s publica no MQTT (HiveMQ) para o painel em tempo real:
- *       sorveteria/<LOJA>/<FREEZER>/temperatura   (retained)
- *       sorveteria/<LOJA>/<FREEZER>/status        "online"/"offline" (retained)
- *     O "offline" é publicado pelo PRÓPRIO BROKER via Last Will (LWT) quando o
- *     ESP32 some (queda de energia, Wi-Fi caiu, travou).
- *  3. A cada 60 s envia a leitura por HTTPS para a Vercel (/api/telemetria).
- *     É ESSE envio que alimenta os alertas em segundo plano. Se ele parar de
- *     chegar, o servidor entende que a loja ficou sem energia/internet.
+ *  1. Lê a temperatura do NTC a cada 10 s (média de várias amostras + detecção
+ *     de sensor rompido/em curto).
+ *  2. A cada 60 s envia a média do período por HTTPS para a Vercel
+ *     (/api/telemetria). Esse único envio alimenta:
+ *       - o PAINEL (que lê o estado guardado no servidor);
+ *       - os ALERTAS em segundo plano (Web Push + Telegram);
+ *       - a detecção de QUEDA DE ENERGIA: se os envios param de chegar,
+ *         o servidor entende que a loja ficou sem energia ou sem internet.
  *
- * Bibliotecas (Gerenciador de Bibliotecas da IDE Arduino):
- *  - PubSubClient (Nick O'Leary)
- *  - Placa: "esp32" by Espressif (core 2.x ou 3.x)
- *
- * Se você já tem um firmware rodando, o que é NOVO e precisa ser incorporado:
- *  - Last Will no connect() do MQTT  (função conectarMqtt)
- *  - Publicação com retained         (publicarMqtt)
- *  - Envio HTTPS para a Vercel       (enviarTelemetria)
- *  - Detecção de sensor inválido     (lerTemperatura retornando NAN)
+ * Não usa mais MQTT/HiveMQ. Nenhuma biblioteca externa é necessária:
+ * só a placa "esp32" by Espressif (core 2.x ou 3.x) na IDE Arduino.
  * ========================================================================== */
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <PubSubClient.h>
 #include <HTTPClient.h>
 #include <math.h>
 
 // ============================== CONFIGURAÇÃO =================================
 // --- Identificação deste freezer (muda em cada placa) ---
 const char* LOJA    = "NEVASKA_SC";     // NEVASKA_SC | NEVASKA_BERNARDINO
-const char* FREEZER = "freezer_01";
+const char* FREEZER = "freezer_01";     // use só letras, números, _ e -
 
 // --- Wi-Fi da loja ---
 const char* WIFI_SSID  = "NOME_DA_REDE";
 const char* WIFI_SENHA = "SENHA_DA_REDE";
 
-// --- HiveMQ Cloud (MQTT sobre TLS, porta 8883 — a 8884 é a do WebSocket do navegador) ---
-const char*    MQTT_HOST    = "ecc7980f7b0c433fbf4b63748514aa36.s1.eu.hivemq.cloud";
-const uint16_t MQTT_PORTA   = 8883;
-const char*    MQTT_USUARIO = "USUARIO_DOS_DISPOSITIVOS";   // credencial com permissão de PUBLISH
-const char*    MQTT_SENHA   = "SENHA_DOS_DISPOSITIVOS";
-
-// --- Vercel (alertas) ---
-const char* URL_TELEMETRIA     = "https://SEU-PROJETO.vercel.app/api/telemetria";
-const char* CHAVE_DISPOSITIVO  = "MESMO_VALOR_DA_VARIAVEL_DEVICE_KEY_NA_VERCEL";
+// --- Vercel ---
+const char* URL_TELEMETRIA    = "https://SEU-PROJETO.vercel.app/api/telemetria";
+const char* CHAVE_DISPOSITIVO = "MESMO_VALOR_DA_VARIAVEL_DEVICE_KEY_NA_VERCEL";
 
 // --- Sensor NTC ---
 // Ligação considerada:  3V3 ── R_SERIE ──┬── NTC ── GND
@@ -68,23 +52,22 @@ const float OFFSET_C     = 0.0;      // calibração fina (compare com um termô
 const int   AMOSTRAS     = 32;
 
 // --- Intervalos ---
-const unsigned long INTERVALO_MQTT_MS  = 10UL * 1000;   // painel em tempo real
-const unsigned long INTERVALO_HTTP_MS  = 60UL * 1000;   // heartbeat dos alertas (servidor considera offline após 3 min)
-const unsigned long REINICIAR_SEM_WIFI_MS = 10UL * 60 * 1000; // reinicia a placa se ficar 10 min sem Wi-Fi
+const unsigned long INTERVALO_LEITURA_MS     = 10UL * 1000;      // lê o sensor
+const unsigned long INTERVALO_ENVIO_MS       = 60UL * 1000;      // envia para a Vercel (servidor considera offline após 3 min)
+const unsigned long REINICIAR_SEM_WIFI_MS    = 10UL * 60 * 1000; // reinicia a placa se ficar 10 min sem Wi-Fi
+const int           FALHAS_HTTP_PARA_REINICIAR = 10;             // ~10 min de envios falhando seguidos
 // =============================================================================
 
-WiFiClientSecure tlsMqtt;
-PubSubClient mqtt(tlsMqtt);
+// Acumulador das leituras entre um envio e outro (o envio manda a média).
+float somaLeituras = 0;
+int   qtdLeiturasValidas = 0;
+int   qtdLeiturasInvalidas = 0;
 
-String topicoTemperatura;
-String topicoStatus;
-
-float ultimaTemp = NAN;
 unsigned long ultimaLeituraMs = 0;
-unsigned long ultimoEnvioHttpMs = 0;
-unsigned long ultimaTentativaMqttMs = 0;
+unsigned long ultimoEnvioMs = 0;
 unsigned long wifiCaiuEmMs = 0;
 bool primeiroEnvioFeito = false;
+int  falhasHttpSeguidas = 0;
 
 // -----------------------------------------------------------------------------
 // Leitura do NTC. Retorna NAN se o sensor estiver aberto ou em curto.
@@ -112,6 +95,34 @@ float lerTemperatura() {
 
   if (tempC < -55.0 || tempC > 60.0) return NAN;
   return tempC;
+}
+
+void registrarLeitura() {
+  float t = lerTemperatura();
+  if (isnan(t)) {
+    qtdLeiturasInvalidas++;
+    Serial.println("[NTC] SENSOR INVALIDO");
+  } else {
+    somaLeituras += t;
+    qtdLeiturasValidas++;
+    Serial.printf("[NTC] %.2f C\n", t);
+  }
+}
+
+// Média do período. Se TODAS as leituras do período foram inválidas, devolve NAN
+// (o servidor transforma isso em alerta de "falha no sensor").
+float mediaDoPeriodo() {
+  if (qtdLeiturasValidas == 0) {
+    if (qtdLeiturasInvalidas == 0) registrarLeitura();  // primeiro envio após ligar
+    if (qtdLeiturasValidas == 0) return NAN;
+  }
+  return somaLeituras / qtdLeiturasValidas;
+}
+
+void zerarPeriodo() {
+  somaLeituras = 0;
+  qtdLeiturasValidas = 0;
+  qtdLeiturasInvalidas = 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -153,46 +164,10 @@ void vigiarWifi() {
 }
 
 // -----------------------------------------------------------------------------
-// MQTT com Last Will: se o ESP32 sumir, o BROKER publica "offline" sozinho.
+// HTTPS → Vercel. Retorna true se o servidor aceitou.
 // -----------------------------------------------------------------------------
-void conectarMqtt() {
-  if (mqtt.connected() || WiFi.status() != WL_CONNECTED) return;
-  if (millis() - ultimaTentativaMqttMs < 5000) return;  // não martela o broker
-  ultimaTentativaMqttMs = millis();
-
-  String clientId = String("esp32_") + LOJA + "_" + FREEZER;
-  Serial.print("[MQTT] conectando... ");
-
-  bool ok = mqtt.connect(
-    clientId.c_str(),
-    MQTT_USUARIO, MQTT_SENHA,
-    topicoStatus.c_str(),  // tópico do Last Will
-    1,                     // QoS do Last Will
-    true,                  // retained: quem abrir o painel depois já vê "offline"
-    "offline"              // mensagem do Last Will
-  );
-
-  if (ok) {
-    Serial.println("ok");
-    mqtt.publish(topicoStatus.c_str(), "online", true);  // retained
-  } else {
-    Serial.printf("falhou, rc=%d\n", mqtt.state());
-  }
-}
-
-void publicarMqtt(float temp) {
-  if (!mqtt.connected()) return;
-  char payload[16];
-  if (isnan(temp)) strcpy(payload, "erro");
-  else snprintf(payload, sizeof(payload), "%.2f", temp);
-  mqtt.publish(topicoTemperatura.c_str(), payload, true);  // retained
-}
-
-// -----------------------------------------------------------------------------
-// HTTPS → Vercel. É isto que garante os alertas com o celular bloqueado.
-// -----------------------------------------------------------------------------
-void enviarTelemetria(float temp) {
-  if (WiFi.status() != WL_CONNECTED) return;
+bool enviarTelemetria(float temp) {
+  if (WiFi.status() != WL_CONNECTED) return false;
 
   WiFiClientSecure tls;
   // setInsecure() criptografa mas não valida o certificado. Para produção mais
@@ -204,7 +179,7 @@ void enviarTelemetria(float temp) {
   http.setConnectTimeout(8000);
   if (!http.begin(tls, URL_TELEMETRIA)) {
     Serial.println("[HTTP] begin falhou");
-    return;
+    return false;
   }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("x-chave-dispositivo", CHAVE_DISPOSITIVO);
@@ -223,6 +198,9 @@ void enviarTelemetria(float temp) {
     Serial.printf("[HTTP] erro: %s\n", http.errorToString(codigo).c_str());
   }
   http.end();
+
+  // 401 = DEVICE_KEY errada; 400 = LOJA/FREEZER com caractere inválido.
+  return codigo >= 200 && codigo < 300;
 }
 
 // =============================================================================
@@ -234,41 +212,34 @@ void setup() {
   analogReadResolution(12);
   // A atenuação padrão do ESP32 já é 11 dB (faixa de 0 a ~3,1 V), ideal para o divisor do NTC.
 
-  topicoTemperatura = String("sorveteria/") + LOJA + "/" + FREEZER + "/temperatura";
-  topicoStatus      = String("sorveteria/") + LOJA + "/" + FREEZER + "/status";
-
   conectarWifi();
-
-  tlsMqtt.setInsecure();  // ver comentário em enviarTelemetria()
-  mqtt.setServer(MQTT_HOST, MQTT_PORTA);
-  mqtt.setKeepAlive(20);   // broker detecta queda em ~30 s e publica o Last Will
-  mqtt.setSocketTimeout(10);
-
-  ultimaTemp = lerTemperatura();
 }
 
 void loop() {
   vigiarWifi();
-  conectarMqtt();
-  mqtt.loop();
 
   unsigned long agora = millis();
 
-  if (agora - ultimaLeituraMs >= INTERVALO_MQTT_MS) {
+  if (agora - ultimaLeituraMs >= INTERVALO_LEITURA_MS) {
     ultimaLeituraMs = agora;
-    ultimaTemp = lerTemperatura();
-    if (isnan(ultimaTemp)) Serial.println("[NTC] SENSOR INVALIDO");
-    else Serial.printf("[NTC] %.2f C\n", ultimaTemp);
-    publicarMqtt(ultimaTemp);
+    registrarLeitura();
   }
 
   // Primeiro envio logo após ligar (avisa o servidor que a energia voltou),
   // depois a cada 60 s.
-  if (!primeiroEnvioFeito || agora - ultimoEnvioHttpMs >= INTERVALO_HTTP_MS) {
-    if (WiFi.status() == WL_CONNECTED) {
-      ultimoEnvioHttpMs = agora;
-      primeiroEnvioFeito = true;
-      enviarTelemetria(ultimaTemp);
+  if ((!primeiroEnvioFeito || agora - ultimoEnvioMs >= INTERVALO_ENVIO_MS) && WiFi.status() == WL_CONNECTED) {
+    ultimoEnvioMs = agora;
+    primeiroEnvioFeito = true;
+
+    bool ok = enviarTelemetria(mediaDoPeriodo());
+    zerarPeriodo();
+
+    if (ok) {
+      falhasHttpSeguidas = 0;
+    } else if (++falhasHttpSeguidas >= FALHAS_HTTP_PARA_REINICIAR) {
+      // Wi-Fi "conectado" mas sem internet de verdade costuma voltar com um reinício.
+      Serial.println("[HTTP] muitas falhas seguidas, reiniciando ESP32");
+      ESP.restart();
     }
   }
 

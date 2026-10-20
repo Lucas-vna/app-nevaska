@@ -1,57 +1,75 @@
-# Nevaska — Alertas de freezer em segundo plano
+# Nevaska — Monitoramento de freezers com alertas em segundo plano
 
-Este pacote resolve o problema dos alertas que não chegam com o celular bloqueado. A ideia central é simples: **quem decide se tem alerta deixa de ser o celular e passa a ser o servidor.** O celular só recebe o aviso pronto, pelo mesmo canal que o WhatsApp e o banco usam (o serviço de push do Google e da Apple), que funciona com a tela apagada e o app fechado.
+Este projeto faz duas coisas: mostra a temperatura dos freezers num painel (PWA) e **avisa no celular quando algo dá errado, mesmo com a tela bloqueada e o app fechado**.
 
-## Como fica a arquitetura
+A ideia central é que **quem decide se tem alerta é o servidor, não o celular.** O celular só recebe o aviso pronto, pelo mesmo canal que o WhatsApp e o banco usam (o serviço de push do Google e da Apple).
+
+O projeto **não usa mais MQTT nem HiveMQ** (o HiveMQ Cloud Serverless será desativado em 31/12/2026). Tudo passa pela Vercel.
+
+## Como funciona
 
 ```
-                ┌──────────── MQTT (10 s) ─────────────►  HiveMQ  ──WebSocket──►  Painel (tempo real)
- ESP32 + NTC ───┤                                      (Last Will "offline")
-                └──── HTTPS POST (60 s) ──►  Vercel /api/telemetria
-                                                   │  regras: tolerância, histerese, repetição
-                                                   │  estado salvo no Upstash Redis
-                                                   ▼
-                    cron 1 min ──► /api/watchdog ──► notificar() ──┬──► Web Push (Android + iPhone PWA)
-                    (+ "carona" em cada telemetria)                ├──► Telegram (grupo da equipe)
-                                                                   └──► Pushover (opcional, alarme crítico)
+ ESP32 + NTC ── HTTPS a cada 60 s ──►  Vercel /api/telemetria
+                                          │  guarda a leitura no Supabase (Postgres)
+                                          │  regras: tolerância, histerese, repetição
+                                          ▼
+   Painel (PWA) ◄── /api/estado ──── Supabase
+                                          │
+   agendador 1 min ──► /api/watchdog ─────┤  (+ verificação "de carona" nas telemetrias)
+                                          ▼
+                                     notificar() ──┬──► Web Push (Android + iPhone PWA)
+                                                   ├──► Telegram (grupo da equipe)
+                                                   └──► Pushover (opcional, alarme crítico)
 ```
 
-- **MQTT continua igual** para o painel ao vivo. Ganhou o Last Will (o próprio broker publica `offline` se o ESP32 sumir).
-- **Novo:** o ESP32 manda a leitura a cada 60 s para a Vercel. Esse envio é o "batimento cardíaco" do sistema.
-- **Queda de energia** é detectada pela ausência desse batimento: se a Vercel não recebe nada de um freezer por 3 minutos, dispara o alerta. Isso pega queda de luz, internet da loja fora e ESP32 travado, que são situações em que o ESP32 não teria como avisar sozinho.
-- O painel não gera mais notificação local, para não duplicar com o push do servidor.
+- O **ESP32** lê o sensor a cada 10 s e envia a média para a Vercel a cada 60 s.
+- O **servidor** guarda a última leitura, avalia as regras e dispara os alertas.
+- O **painel** consulta o servidor a cada 20 s (só enquanto está aberto na tela). Não tem senha de broker no navegador.
+- **Queda de energia** é percebida pela ausência de envios: se um freezer fica 3 minutos sem mandar nada, sai o alerta "SEM SINAL". Isso cobre queda de luz, internet da loja fora e ESP32 travado.
 
 ## Estrutura dos arquivos
 
 ```
-index.html               painel (substitui o atual)
+index.html               painel
 sw.js                    service worker que recebe o push com o app fechado
-manifest.json            manifest real do PWA (necessário para instalar no iPhone)
+manifest.json            manifest do PWA (necessário para instalar no iPhone)
 icons/                   ícones do app e da notificação (pode trocar pelos da marca)
-api/telemetria.js        recebe a leitura do ESP32 e decide os alertas
+api/telemetria.js        recebe a leitura do ESP32, guarda e decide os alertas
+api/estado.js            entrega ao painel o estado atual de todos os freezers
 api/watchdog.js          detecta freezer sem sinal (queda de energia/internet)
 api/inscrever.js         cadastra/remove o celular para receber push
-api/config.js            entrega a chave pública VAPID e os limites ao painel
+api/config.js            entrega ao painel a chave pública VAPID, lojas e limites
 api/teste-alerta.js      dispara uma notificação de teste em todos os canais
-lib/                     regras, envio de notificações, Redis, autenticação
+lib/                     regras, envio de notificações, banco (db.js), autenticação
+supabase/schema.sql      script que cria as tabelas no Supabase (rodar uma vez)
 tests/                   testes automáticos (npm test)
-firmware/                sketch do ESP32
+firmware/                sketch do ESP32 (fica no Git, mas não é publicado no site)
 vercel.json              cabeçalhos do sw.js e do manifest
+.gitignore               impede node_modules e .env de irem para o Git
+.vercelignore            impede firmware/tests/README de virarem páginas públicas
 ```
 
 ## Passo a passo de implantação
 
 ### 1. Copiar para o repositório
 
-Coloque todos os arquivos na raiz do repositório que a Vercel já publica (substituindo o `index.html`). Como agora existe `package.json`, a Vercel instala as dependências sozinha no deploy.
+Coloque todos os arquivos na raiz do repositório que a Vercel publica e faça o push (`git add .`, `git commit -m "..."`, `git push`). Como existe `package.json`, a Vercel instala as dependências sozinha no deploy.
 
 Para rodar os testes localmente: `npm install` e depois `npm test`.
 
-### 2. Criar o banco (Upstash Redis)
+### 2. Criar o banco (Supabase, gratuito)
 
-Na Vercel: **Storage → Marketplace → Upstash (Redis) → Create → conectar ao projeto**. As variáveis `KV_REST_API_URL` e `KV_REST_API_TOKEN` são criadas automaticamente. O plano gratuito sobra para esse volume.
+O banco guarda a última leitura de cada freezer, a situação dos alertas e a lista de celulares inscritos. As funções da Vercel não têm memória entre uma chamada e outra, então tudo isso precisa ficar num banco.
 
-Se preferir criar direto em upstash.com, copie a REST URL e o token para `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`.
+1. Crie uma conta em **supabase.com** e clique em **New project**. Escolha o plano **Free**, dê um nome (ex.: `nevaska`), crie uma senha para o banco (guarde, mas o sistema não vai usar ela) e escolha a região **South America (São Paulo)**.
+2. Quando o projeto terminar de ser criado, abra **SQL Editor → New query**, cole todo o conteúdo do arquivo `supabase/schema.sql` e clique em **Run**. Deve aparecer "Success. No rows returned". Se rodar duas vezes por engano, não tem problema.
+3. Em **Project Settings → API Keys** (em alguns painéis aparece como **API** ou **Data API**), copie:
+   - a **Project URL** → variável `SUPABASE_URL`;
+   - a chave **secreta**: a `service_role` (às vezes na aba "Legacy API keys") ou a `secret` (começa com `sb_secret_`) → variável `SUPABASE_SERVICE_ROLE_KEY`.
+
+> Use a chave **secreta** só na Vercel. Nunca coloque ela no `index.html` nem no firmware. A chave pública (`anon`/`publishable`) não é usada pelo projeto, e o script deixou o banco fechado para ela: mesmo que alguém a encontre, não consegue ler nem gravar nada.
+
+**Sobre custo:** o plano gratuito do Supabase não limita o número de requisições; os limites são 500 MB de banco e 5 GB de tráfego por mês, e o sistema usa uma fração mínima disso. O ponto de atenção é que projetos gratuitos são **pausados depois de 1 semana sem atividade**. Como os ESP32 gravam no banco a cada minuto, isso não deve acontecer; mas se um dia todas as placas ficarem desligadas por mais de uma semana, entre no painel do Supabase e clique em **Restore** no projeto. O plano gratuito permite até 2 projetos ativos por conta.
 
 ### 3. Gerar as chaves do Web Push (VAPID)
 
@@ -67,10 +85,11 @@ Copie a *Public Key* para `VAPID_PUBLIC_KEY` e a *Private Key* para `VAPID_PRIVA
 
 ### 4. Criar os segredos
 
-Gere dois valores aleatórios (pode ser `openssl rand -hex 32` ou um gerador de senha):
+Gere valores aleatórios (pode ser `openssl rand -hex 32` ou um gerador de senha):
 
-- `DEVICE_KEY` → vai no firmware de todos os ESP32 (autentica a telemetria).
+- `DEVICE_KEY` → vai no firmware de todos os ESP32 (autentica o envio das leituras).
 - `CRON_SECRET` → autentica o agendador e o endpoint de teste.
+- `PAINEL_CHAVE` → **opcional.** Se existir, o painel pede essa senha uma vez em cada celular (fica salva no aparelho). Se não existir, qualquer pessoa com o link vê as temperaturas, mas não consegue alterar nada.
 
 ### 5. Configurar o Telegram (canal redundante)
 
@@ -78,7 +97,7 @@ Gere dois valores aleatórios (pode ser `openssl rand -hex 32` ou um gerador de 
 2. Crie um grupo (ex.: "Alertas Nevaska"), adicione o bot e as pessoas responsáveis.
 3. No grupo, envie `/start@NomeDoSeuBot`.
 4. Abra no navegador `https://api.telegram.org/bot<TOKEN>/getUpdates` e procure `"chat":{"id":-100...`. Esse número (com o sinal de menos) vai em `TELEGRAM_CHAT_IDS`. Pode colocar mais de um, separados por vírgula.
-5. Peça para cada pessoa abrir o grupo, tocar no nome dele e garantir que as notificações estão ativas (de preferência com um som próprio, para diferenciar dos outros grupos).
+5. Peça para cada pessoa abrir o grupo e garantir que as notificações estão ativas (de preferência com um som próprio, para diferenciar dos outros grupos).
 
 ### 6. Agendar o watchdog (detecção de queda de energia)
 
@@ -97,40 +116,41 @@ O `/api/watchdog` precisa ser chamado a cada 1 minuto. Duas opções:
 
 A Vercel envia o `CRON_SECRET` sozinha no header. Não coloque esse bloco no plano Hobby: o deploy falha.
 
-> Vale lembrar que o plano Hobby da Vercel é voltado para uso pessoal; como isso é um sistema de cliente em produção, o Pro é o caminho mais correto contratualmente, e ainda resolve o agendamento.
+> O plano Hobby da Vercel é voltado para uso pessoal; como isso é um sistema de cliente em produção, o Pro é o caminho mais correto contratualmente, e ainda resolve o agendamento.
 
-Mesmo que o agendador atrase, cada telemetria recebida de qualquer freezer também roda a verificação "de carona" (no máximo uma vez a cada 50 s). Se a loja de Santa Cruz cair inteira, os freezers de Bernardino continuam enviando e o alerta sai do mesmo jeito.
+Mesmo que o agendador atrase, as telemetrias recebidas também rodam a verificação "de carona" (no máximo uma vez a cada 50 s). Se a loja de Santa Cruz cair inteira, os freezers de Bernardino continuam enviando e o alerta sai do mesmo jeito. O agendador continua necessário para o caso de **todas** as lojas ficarem fora ao mesmo tempo.
 
 ### 7. (Opcional) Pushover para alarme crítico
 
 Para quem precisa ser **acordado** (dono, gerente de plantão), o Pushover tem prioridade de emergência: toca uma sirene, fura o modo silencioso e repete a cada minuto até a pessoa tocar em "Confirmar". Cada pessoa instala o app (licença única por plataforma, após 30 dias de teste). Crie uma aplicação em pushover.net, um *Delivery Group* com as pessoas e preencha `PUSHOVER_APP_TOKEN` e `PUSHOVER_USER_KEY` (a chave do grupo). Se não preencher, o canal fica desligado.
 
-### 8. HiveMQ: separar as credenciais
+### 8. Gravar o firmware novo nos ESP32 (obrigatório)
 
-O `index.html` é público; qualquer pessoa consegue ler a senha que está nele. No console do HiveMQ Cloud crie duas credenciais:
+O firmware antigo só publicava no MQTT. Sem o firmware novo, **o painel fica vazio e os alertas não funcionam**.
 
-- **painel_leitura** → permissão só de *Subscribe* em `sorveteria/#`. Essa vai no `index.html`.
-- **dispositivos** → permissão de *Publish* em `sorveteria/#`. Essa vai só no firmware.
+1. Faça uma **cópia** de `firmware/nevaska_freezer/` fora da pasta do repositório (é nela que você vai colocar as senhas reais).
+2. Preencha o bloco de configuração: `LOJA`, `FREEZER`, Wi-Fi, `URL_TELEMETRIA` e `CHAVE_DISPOSITIVO` (= `DEVICE_KEY` da Vercel).
+3. Confira o comentário sobre o **resistor fixo do NTC**: para a faixa de freezer ele deve ser de ~100 kΩ (ou 47 kΩ), e o valor em `R_SERIE` tem de bater com o que está soldado na placa.
+4. Grave em cada placa pela IDE Arduino (placa "esp32" by Espressif). Não precisa de nenhuma biblioteca extra.
+5. Abra o Monitor Serial (115200): deve aparecer `[HTTP] 200 {"ok":true...}` a cada minuto. `401` = `CHAVE_DISPOSITIVO` errada; `400` = nome de loja/freezer com caractere inválido.
 
-Assim, mesmo que alguém pegue a senha do painel, não consegue publicar temperatura falsa.
+### 9. Desligar o HiveMQ
 
-### 9. Gravar o firmware
-
-Abra `firmware/nevaska_freezer/nevaska_freezer.ino`, preencha o bloco de configuração (loja, freezer, Wi-Fi, HiveMQ, URL da Vercel e `DEVICE_KEY`) e grave em cada placa. Atenção ao comentário sobre o **resistor fixo do NTC**: para a faixa de freezer ele deve ser de ~100 kΩ (ou 47 kΩ), e o valor em `R_SERIE` tem de bater com o que está soldado na placa.
-
-Bibliotecas: **PubSubClient** e o core **esp32** da Espressif.
+Depois que todas as placas estiverem com o firmware novo e aparecendo no painel, o HiveMQ não é mais usado. Pode apagar o cluster "Free #1" no console deles (ou só deixar que ele seja desativado em 31/12/2026).
 
 ## Variáveis de ambiente (Vercel → Settings → Environment Variables)
 
 | Variável | Obrigatória | Exemplo / padrão | Para que serve |
 |---|---|---|---|
-| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | sim | criadas pelo Upstash | banco de estado |
+| `SUPABASE_URL` | sim | `https://xxxx.supabase.co` | endereço do banco |
+| `SUPABASE_SERVICE_ROLE_KEY` | sim | chave secreta do Supabase | acesso do servidor ao banco |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | sim | gerar no passo 3 | Web Push |
 | `VAPID_SUBJECT` | sim | `mailto:ti@nevaska.com.br` | contato exigido pelo Web Push |
 | `DEVICE_KEY` | sim | aleatório | autentica o ESP32 |
 | `CRON_SECRET` | sim | aleatório | autentica watchdog e teste |
 | `TELEGRAM_BOT_TOKEN` | recomendada | `123:ABC...` | canal Telegram |
 | `TELEGRAM_CHAT_IDS` | recomendada | `-1001234567890` | grupo(s) que recebem |
+| `PAINEL_CHAVE` | opcional | aleatório | senha para abrir o painel |
 | `PUSHOVER_APP_TOKEN` / `PUSHOVER_USER_KEY` | opcional | | alarme crítico |
 | `LIMITE_TEMP_C` | não | `-12` | temperatura de alerta (°C) |
 | `LIMITES_FREEZERS` | não | `{"NEVASKA_SC/freezer_02": -8}` | limite por freezer |
@@ -138,10 +158,10 @@ Bibliotecas: **PubSubClient** e o core **esp32** da Espressif.
 | `TOLERANCIA_MIN` | não | `5` | minutos acima do limite antes de alertar |
 | `REPETIR_ALERTA_MIN` | não | `30` | repete o aviso enquanto o problema continuar (0 = não repete) |
 | `OFFLINE_MIN` | não | `3` | minutos sem dados para considerar offline |
-| `NOMES_LOJAS` | não | `{"NEVASKA_SC":"Santa Cruz","NEVASKA_BERNARDINO":"Bernardino"}` | nome nas mensagens |
+| `NOMES_LOJAS` | não | `{"NEVASKA_SC":"Santa Cruz","NEVASKA_BERNARDINO":"Bernardino"}` | nomes das abas e das mensagens |
 | `APP_URL` | não | `https://nevaska.vercel.app/` | link aberto ao tocar na notificação |
 
-Depois de mudar qualquer variável, faça um **Redeploy** para valer.
+Depois de mudar qualquer variável, faça um **Redeploy** para valer. Para abrir uma loja nova, basta incluí-la em `NOMES_LOJAS` e gravar as placas com o novo `LOJA`: a aba aparece sozinha no painel.
 
 ## Ativando nos celulares da equipe
 
@@ -155,7 +175,7 @@ Depois de mudar qualquer variável, faça um **Redeploy** para valer.
    ```bash
    curl -H "Authorization: Bearer SEU_CRON_SECRET" https://SEU-PROJETO.vercel.app/api/teste-alerta
    ```
-   Bloqueie os celulares, feche o app (tire da multitarefa) e rode o comando. Todos devem receber no push e no Telegram. A resposta mostra o resultado de cada canal. Use `?urgente=1` para testar o alarme do Pushover.
+   Bloqueie os celulares, feche o app (tire da multitarefa) e rode o comando. Todos devem receber no push e no Telegram. A resposta mostra o resultado de cada canal. Use `?urgente=1` para testar o alarme do Pushover. (No Windows/PowerShell use `curl.exe` em vez de `curl`.)
 
 2. **Alerta de temperatura** (simulando o ESP32; com `TOLERANCIA_MIN=0` temporariamente para não esperar 5 min)
    ```bash
@@ -163,15 +183,15 @@ Depois de mudar qualquer variável, faça um **Redeploy** para valer.
      -H "Content-Type: application/json" -H "x-chave-dispositivo: SEU_DEVICE_KEY" \
      -d '{"loja":"NEVASKA_SC","freezer":"freezer_99","temp":-3}'
    ```
-   Depois mande `"temp":-20` para ver a mensagem de normalização.
+   O `freezer_99` aparece no painel em vermelho e chega o alerta. Depois mande `"temp":-20` para ver a mensagem de normalização.
 
-3. **Queda de energia:** com um ESP32 real rodando, desligue-o da tomada. Em até ~3–4 minutos deve chegar "SEM SINAL". Religue: chega "Sinal restabelecido". No painel, o card fica cinza com "OFFLINE" em ~30 s (Last Will do MQTT).
+3. **Queda de energia:** com um ESP32 real rodando, desligue-o da tomada. Em até ~3–4 minutos chega "SEM SINAL" e o card fica cinza com "OFFLINE" no painel. Religue: chega "Sinal restabelecido".
 
-4. **Sensor:** desconecte o NTC com o ESP32 ligado. Deve chegar "FALHA NO SENSOR".
+4. **Sensor:** desconecte o NTC com o ESP32 ligado. No envio seguinte chega "FALHA NO SENSOR" e o card mostra "ERRO".
 
 5. Os testes automáticos da lógica rodam com `npm test`.
 
-Depois dos testes, lembre de remover o `freezer_99` de teste: no console do Upstash, apague o membro `NEVASKA_SC/freezer_99` do conjunto `nv:freezers` e a chave `nv:f:NEVASKA_SC/freezer_99` (senão o watchdog vai alertar que ele ficou offline). O mesmo vale quando um freezer for desativado de verdade.
+Depois dos testes, remova o `freezer_99`: no Supabase, abra **Table Editor → freezers**, marque a linha `NEVASKA_SC/freezer_99` e apague (senão o watchdog vai alertar que ele ficou offline). O mesmo vale quando um freezer for desativado de verdade.
 
 ## Sobre "100% confiável"
 

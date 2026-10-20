@@ -1,17 +1,17 @@
 // =============================================================================
 // POST /api/telemetria
-// Recebe a leitura do ESP32 (a cada 60 s), decide se precisa alertar e dispara
-// as notificações. É o "cérebro" que antes ficava no navegador do celular.
+// Recebe a leitura do ESP32 (a cada 60 s), guarda para o painel, decide se
+// precisa alertar e dispara as notificações. É o "cérebro" do sistema.
 //
 // Header:  x-chave-dispositivo: <DEVICE_KEY>
 // Corpo:   { "loja": "NEVASKA_SC", "freezer": "freezer_01", "temp": -19.4 }
 //          (temp = null quando o ESP32 detecta sensor desconectado)
 // =============================================================================
-import { redis, CHAVES } from '../lib/redis.js';
+import { lerEstado, salvarEstado } from '../lib/db.js';
 import { CONFIG, limiteDe, nomeLoja } from '../lib/config.js';
 import { avaliarLeitura, montarMensagem } from '../lib/regras.js';
 import { notificar } from '../lib/notificar.js';
-import { executarWatchdog } from '../lib/watchdog.js';
+import { watchdogDeCarona } from '../lib/watchdog.js';
 import { dispositivoAutorizado } from '../lib/auth.js';
 
 const ID_VALIDO = /^[A-Za-z0-9_-]{1,40}$/;
@@ -36,13 +36,13 @@ export default async function handler(req, res) {
   const temp = typeof corpo.temp === 'number' ? corpo.temp : parseFloat(corpo.temp);
 
   const id = `${loja}/${freezer}`;
-  const r = redis();
 
   try {
-    const estado = (await r.hgetall(CHAVES.estado(id))) || {};
+    const estado = await lerEstado(id);
     const { novo, eventos } = avaliarLeitura(estado, temp, Date.now(), CONFIG, limiteDe(id));
 
-    await Promise.all([r.sadd(CHAVES.freezers, id), r.hset(CHAVES.estado(id), novo)]);
+    // Cria a linha do freezer na primeira leitura e atualiza nas seguintes.
+    await salvarEstado(id, novo);
 
     // Notifica ANTES de responder: em serverless, código depois do res.json()
     // pode ser congelado e nunca terminar.
@@ -53,7 +53,7 @@ export default async function handler(req, res) {
     // Verificação de offline "de carona" (no máximo 1x a cada 50 s).
     let watchdog = null;
     try {
-      watchdog = await executarWatchdog({ intervaloMinimoS: 50 });
+      watchdog = await watchdogDeCarona();
     } catch (err) {
       console.error('[telemetria] watchdog de carona falhou:', err.message);
     }
